@@ -24,7 +24,7 @@ use_plugin("copy_resources")
 use_plugin("python.distutils")
 
 name = "karellen-jdb-mcp"
-version = "0.0.1.dev"
+version = "0.0.1"
 
 summary = "MCP Server for JDB (Java Debugger)"
 authors = [Author("Karellen, Inc.", "supervisor@karellen.co")]
