@@ -1,25 +1,53 @@
-# karellen-jdb-mcp
+# MCP Server for JDB Java Debugging (karellen-jdb-mcp)
 
-MCP Server for JDB (Java Debugger) — enables Claude Code to debug JVM processes
-via the Java Platform Debugger Architecture (JPDA).
+[![Gitter](https://img.shields.io/gitter/room/karellen/lobby?logo=gitter)](https://gitter.im/karellen/Lobby)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/karellen/karellen-jdb-mcp/build.yml?branch=master)](https://github.com/karellen/karellen-jdb-mcp/actions/workflows/build.yml)
+[![Coverage Status](https://img.shields.io/coveralls/github/karellen/karellen-jdb-mcp/master?logo=coveralls)](https://coveralls.io/r/karellen/karellen-jdb-mcp?branch=master)
+
+[![karellen-jdb-mcp Version](https://img.shields.io/pypi/v/karellen-jdb-mcp?logo=pypi)](https://pypi.org/project/karellen-jdb-mcp/)
+[![karellen-jdb-mcp Python Versions](https://img.shields.io/pypi/pyversions/karellen-jdb-mcp?logo=pypi)](https://pypi.org/project/karellen-jdb-mcp/)
+[![karellen-jdb-mcp Downloads Per Day](https://img.shields.io/pypi/dd/karellen-jdb-mcp?logo=pypi)](https://pypi.org/project/karellen-jdb-mcp/)
+[![karellen-jdb-mcp Downloads Per Week](https://img.shields.io/pypi/dw/karellen-jdb-mcp?logo=pypi)](https://pypi.org/project/karellen-jdb-mcp/)
+[![karellen-jdb-mcp Downloads Per Month](https://img.shields.io/pypi/dm/karellen-jdb-mcp?logo=pypi)](https://pypi.org/project/karellen-jdb-mcp/)
 
 ## Overview
 
-karellen-jdb-mcp wraps JDB as a Model Context Protocol (MCP) server, exposing
-structured debugging tools that Claude Code can use to attach to running JVMs,
-set breakpoints, inspect state, evaluate expressions, and navigate execution.
+`karellen-jdb-mcp` is an [MCP](https://modelcontextprotocol.io/) (Model Context Protocol)
+server that enables any MCP-compliant LLM client to use [JDB](https://docs.oracle.com/en/java/javase/21/docs/specs/man/jdb.html)
+(the Java Debugger) for debugging JVM processes. The LLM can attach to a running JVM,
+set breakpoints, step through code, evaluate expressions, inspect threads, and analyze
+concurrency issues, all through structured JSON tool calls over the JDWP protocol.
 
-## Features
+## Requirements
 
-- Attach to any JVM with JDWP enabled
-- Breakpoints (line, method, conditional), exception breakpoints, field watchpoints
-- Execution control: step into/over/out, continue, run
-- State inspection: locals, expression evaluation, object dumps
-- Thread management and concurrency analysis (lock/monitor info)
-- Class introspection: classes, methods, fields, class hierarchy
-- Source code listing, tracing, monitors (auto-execute on stop)
-- Frame manipulation (pop, reenter)
-- JDK version detection with feature flags (JDK 8 through 24+)
+- **Java Development Kit** (JDK) with `jdb` on PATH (JDK 8 through 24+ supported)
+- **Python** >= 3.10
+- Works on **Linux**, **macOS**, and **Windows** (anywhere JDB runs)
+
+### Installing a JDK
+
+**Fedora / RHEL / CentOS:**
+```bash
+sudo dnf install java-21-openjdk-devel
+```
+
+**Ubuntu / Debian:**
+```bash
+sudo apt install openjdk-21-jdk
+```
+
+**macOS (Homebrew):**
+```bash
+brew install openjdk@21
+```
+
+### Verify the setup
+
+```bash
+jdb -version
+```
+
+This should print something like `This is jdb version 21.0.4`.
 
 ## Installation
 
@@ -27,13 +55,57 @@ set breakpoints, inspect state, evaluate expressions, and navigate execution.
 pip install karellen-jdb-mcp
 ```
 
-Requires Python 3.10+ and a JDK with `jdb` on PATH.
+Or with pipx for an isolated environment:
 
-## Usage
+```bash
+pipx install karellen-jdb-mcp
+```
 
-### As an MCP server
+## Claude Code Integration
 
-Add to your Claude Code MCP configuration:
+### Claude Code plugin (recommended)
+
+The plugin automatically configures the MCP server and includes:
+
+- **Exception detection hook** that suggests JDB when a Bash command output contains
+  Java exception stack traces (`Exception in thread`, `NullPointerException`, etc.)
+- **`/karellen-jdb-mcp:jdb-debug` skill** that walks through the full
+  launch-attach-debug workflow step by step, with build-tool-specific JDWP stanzas
+- **`jdb-investigator` agent** that Claude can spawn to autonomously investigate
+  Java exceptions, deadlocks, and logic bugs using JDB
+
+From the [Karellen plugins marketplace](https://github.com/karellen/claude-plugins):
+
+```bash
+claude plugin marketplace add karellen/claude-plugins
+claude plugin install karellen-jdb-mcp@karellen-plugins
+```
+
+Or from the official Anthropic marketplace (if accepted):
+
+```bash
+claude plugin install karellen-jdb-mcp@claude-plugins-official
+```
+
+Or load directly from a local checkout for testing:
+
+```bash
+claude --plugin-dir /path/to/karellen-jdb-mcp
+```
+
+### Manual MCP server configuration
+
+If you prefer not to use the plugin, you can configure the MCP server directly.
+This gives you the MCP tools but not the skill, agent, or exception detection hook.
+
+Using the CLI:
+
+```bash
+claude mcp add --transport stdio karellen-jdb-mcp -- karellen-jdb-mcp
+```
+
+Or manually add to `~/.claude.json` (user scope) or `.mcp.json` in your project root
+(project scope, shared via version control):
 
 ```json
 {
@@ -46,46 +118,197 @@ Add to your Claude Code MCP configuration:
 }
 ```
 
-### Debugging a Java application
+If installed with pipx:
 
-1. Start the target JVM with JDWP:
-   ```bash
-   java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005 \
-        -cp target/classes com.example.Main
-   ```
+```bash
+claude mcp add --transport stdio karellen-jdb-mcp -- pipx run karellen-jdb-mcp
+```
 
-2. Connect JDB via the MCP tool:
-   ```
-   jdb_connect(host="localhost", port=5005)
-   ```
+or manually:
 
-3. Set breakpoints and debug:
-   ```
-   jdb_breakpoint_set("com.example.Main:42")
-   jdb_run()
-   jdb_where()
-   jdb_locals()
-   ```
+```json
+{
+  "mcpServers": {
+    "karellen-jdb-mcp": {
+      "type": "stdio",
+      "command": "pipx",
+      "args": ["run", "karellen-jdb-mcp"]
+    }
+  }
+}
+```
 
-4. Clean up:
-   ```
-   jdb_disconnect()
-   ```
+### Auto-approve jdb tools
+
+By default Claude Code will prompt for confirmation before each `jdb_*` tool call.
+You can approve individually by selecting "Yes, and don't ask again" when prompted.
+
+To auto-approve all tools upfront, add a permission rule to your user settings
+(`~/.claude/settings.json`):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_karellen-jdb-mcp_karellen-jdb-mcp__*",
+      "mcp__karellen-jdb-mcp__*"
+    ]
+  }
+}
+```
+
+The first rule covers plugin-loaded tools, the second covers manual MCP configuration.
+
+Or for a project-scoped setting, add the same rule to `.claude/settings.json` in your
+project root (this file can be committed to version control so all team members get it).
+
+## Available Tools
+
+### Session Lifecycle
+| Tool | Description |
+|------|-------------|
+| `jdb_connect` | Attach to a running JVM via JDWP. |
+| `jdb_disconnect` | Disconnect and clean up. |
+| `jdb_version` | Get JDB version info and available features. |
+
+### Execution Control
+| Tool | Description |
+|------|-------------|
+| `jdb_run` | Start execution of the application's main class. |
+| `jdb_cont` | Continue until next breakpoint/exception/exit. |
+| `jdb_step` | Step into (enter method calls). |
+| `jdb_next` | Step over (skip method calls). |
+| `jdb_step_up` | Step out (run until current method returns). |
+
+### Breakpoints
+| Tool | Description |
+|------|-------------|
+| `jdb_breakpoint_set` | Set breakpoint at class:line or class.method. Supports thread filters and suspend policy on JDK 13+. |
+| `jdb_breakpoint_clear` | Clear a breakpoint. |
+| `jdb_breakpoint_list` | List all breakpoints. |
+| `jdb_catch` | Break on exception (caught/uncaught/all). Supports wildcard patterns. |
+| `jdb_ignore` | Cancel an exception breakpoint. |
+
+### Watchpoints
+| Tool | Description |
+|------|-------------|
+| `jdb_watch` | Watch field access/modifications. |
+| `jdb_unwatch` | Remove a field watchpoint. |
+
+### Thread Management
+| Tool | Description |
+|------|-------------|
+| `jdb_threads` | List all threads by group with status. |
+| `jdb_thread` | Set default thread for subsequent commands. |
+| `jdb_suspend` | Suspend threads (all or specific). |
+| `jdb_resume` | Resume threads (all or specific). |
+
+### Stack Navigation
+| Tool | Description |
+|------|-------------|
+| `jdb_where` | Get call stack (stack trace). Use `"all"` for all threads. |
+| `jdb_up` | Move up the call stack (toward caller). |
+| `jdb_down` | Move down the call stack (toward callee). |
+
+### State Inspection
+| Tool | Description |
+|------|-------------|
+| `jdb_print` | Evaluate Java expression (fields, locals, method calls, arithmetic). |
+| `jdb_dump` | Dump object showing all fields (static and instance). |
+| `jdb_eval` | Evaluate expression (alias for print). |
+| `jdb_set` | Assign value to variable, field, or array element. |
+| `jdb_locals` | List local variables with values. |
+
+### Class Introspection
+| Tool | Description |
+|------|-------------|
+| `jdb_classes` | List all loaded classes. |
+| `jdb_class_info` | Show class details (superclass, interfaces). |
+| `jdb_methods` | List class methods. |
+| `jdb_fields` | List class fields. |
+
+### Source
+| Tool | Description |
+|------|-------------|
+| `jdb_list` | List source code at current position or specified location. |
+| `jdb_sourcepath` | Display or change source path for .java files. |
+| `jdb_classpath` | Print classpath info from target JVM. |
+
+### Concurrency Analysis
+| Tool | Description |
+|------|-------------|
+| `jdb_lock` | Object lock/monitor info (owner thread, waiting threads). |
+| `jdb_threadlocks` | Thread lock info (owned monitors, lock being waited on). |
+
+### Frame Manipulation
+| Tool | Description |
+|------|-------------|
+| `jdb_pop` | Pop current frame (return to caller, allows re-execution). |
+| `jdb_reenter` | Re-enter current method from the beginning. |
+
+### Tracing
+| Tool | Description |
+|------|-------------|
+| `jdb_trace` | Trace method entries/exits (optionally per-thread). |
+| `jdb_untrace` | Stop tracing. |
+
+### Monitors (Auto-execute)
+| Tool | Description |
+|------|-------------|
+| `jdb_monitor` | Auto-execute a command on every stop (e.g. `"locals"`, `"where"`). |
+| `jdb_monitor_list` | List active monitors. |
+| `jdb_unmonitor` | Remove a monitor. |
+
+### Configuration
+| Tool | Description |
+|------|-------------|
+| `jdb_exclude` | Set/display step exclusion filter (skip library classes when stepping). |
+
+## Configuration
+
+### Timeouts
+
+All timeouts are configurable via environment variables (in seconds). Set them in your
+MCP server configuration:
+
+```json
+{
+  "mcpServers": {
+    "karellen-jdb-mcp": {
+      "type": "stdio",
+      "command": "karellen-jdb-mcp",
+      "env": {
+        "JDB_MCP_TIMEOUT_EXECUTION": "300"
+      }
+    }
+  }
+}
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JDB_MCP_TIMEOUT_CONNECT` | 60 | JDB attach and initial prompt |
+| `JDB_MCP_TIMEOUT_COMMAND` | 30 | Non-execution commands (breakpoints, inspection, etc.) |
+| `JDB_MCP_TIMEOUT_EXECUTION` | 120 | Execution commands (run, cont, step, next, step up) |
 
 ## Build Tool Debug Stanzas
 
+To debug a JVM process, it must be started with the JDWP agent. The exact syntax
+varies by build tool:
+
 | Build Tool | Command |
 |---|---|
+| Plain `java` | `java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005 ...` |
 | Maven Surefire | `mvn -Dmaven.surefire.debug test` |
 | Maven Failsafe | `mvn -Dmaven.failsafe.debug verify` |
 | Gradle tests | `./gradlew test --debug-jvm` |
-| Tycho Surefire | `mvn verify -Dtycho.testArgLine="-agentlib:jdwp=..."` |
-| Spring Boot | `mvn spring-boot:run -Dspring-boot.run.jvmArguments="-agentlib:jdwp=..."` |
-| Any (fallback) | `JAVA_TOOL_OPTIONS="-agentlib:jdwp=..." <command>` |
+| Tycho Surefire | `mvn verify -Dtycho.testArgLine="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005"` |
+| Spring Boot | `mvn spring-boot:run -Dspring-boot.run.jvmArguments="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005"` |
+| Any (fallback) | `JAVA_TOOL_OPTIONS="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:5005" <command>` |
 
 ## License
 
-Apache License 2.0
+Apache-2.0
 
 ## Privacy
 

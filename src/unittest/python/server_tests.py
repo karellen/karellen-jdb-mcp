@@ -124,7 +124,8 @@ class ConnectToolTests(unittest.TestCase):
         self.assertEqual(result.jdk_major_version, 21)
         mock_session.connect.assert_called_once_with(
             "jdb", "myhost", 8000,
-            sourcepath=None, classpath=None, trackallthreads=False)
+            sourcepath=None, classpath=None, trackallthreads=False,
+            wait_timeout=0)
 
     def test_connect_already_active(self):
         server._jdb_session = MagicMock()
