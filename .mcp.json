@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "karellen-jdb-mcp": {
+      "type": "stdio",
+      "command": "karellen-jdb-mcp"
+    }
+  }
+}
