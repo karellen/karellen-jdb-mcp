@@ -17,8 +17,6 @@ check_command() {
 }
 
 check_command "karellen-jdb-mcp" "Run: pip install karellen-jdb-mcp"
-check_command "jdb" "Install a JDK (e.g. apt install default-jdk, brew install openjdk)."
-check_command "java" "Install a JDK (e.g. apt install default-jdk, brew install openjdk)."
 
 [ -z "$WARNINGS" ] && exit 0
 
