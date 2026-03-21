@@ -149,13 +149,32 @@ class ConnectStatus:
 
 
 @dataclass
+class SessionInfo:
+    port: int
+    connected: bool
+    jdb_version: Optional[str] = None
+    jdk_major_version: Optional[int] = None
+
+
+@dataclass
 class StringResult:
     result: str
 
 
 @dataclass
-class IntResult:
-    result: int
+class LaunchResult:
+    port: int
+    pid: int
+    command: List[str]
+
+
+@dataclass
+class ProcessStatus:
+    port: int
+    pid: int
+    command: List[str]
+    running: bool
+    exit_code: Optional[int] = None
 
 
 @dataclass

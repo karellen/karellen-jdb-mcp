@@ -162,13 +162,63 @@ The first rule covers plugin-loaded tools, the second covers manual MCP configur
 Or for a project-scoped setting, add the same rule to `.claude/settings.json` in your
 project root (this file can be committed to version control so all team members get it).
 
+## Quick Start
+
+### With `jdb_launch` (recommended)
+
+Launch the JVM with `${JDB_PORT}` substitution — a random free port is allocated:
+
+```
+jdb_launch(["java", "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${JDB_PORT}",
+            "-cp", "target/classes", "com.example.Main"])
+```
+
+Connect (port auto-resolves when there's one launched process):
+
+```
+jdb_connect(wait_timeout=30)
+```
+
+Debug:
+
+```
+jdb_breakpoint_set("com.example.Main:42")
+jdb_run()
+jdb_where()
+jdb_locals()
+```
+
+Clean up:
+
+```
+jdb_disconnect()
+jdb_launch_stop(port=<port>)
+```
+
+### With a manually started JVM
+
+Start the JVM yourself with JDWP on a known port, then connect:
+
+```
+jdb_connect(port=5005, wait_timeout=30)
+```
+
 ## Available Tools
+
+### Process Launch
+| Tool | Description |
+|------|-------------|
+| `jdb_launch` | Launch a JVM with JDWP on a random port. `${JDB_PORT}` is substituted in the command. |
+| `jdb_launch_list` | List all launched JVM processes with status. |
+| `jdb_launch_status` | Get status of a launched process by port. |
+| `jdb_launch_stop` | Stop a launched process by port. |
 
 ### Session Lifecycle
 | Tool | Description |
 |------|-------------|
-| `jdb_connect` | Attach to a running JVM via JDWP. |
-| `jdb_disconnect` | Disconnect and clean up. |
+| `jdb_connect` | Attach to a running JVM via JDWP. Auto-resolves port from single launched process, or defaults to 5005. |
+| `jdb_disconnect` | Disconnect and clean up. Port optional if only one session active. |
+| `jdb_session_list` | List all active debug sessions with port, connection status, and JDK version. |
 | `jdb_version` | Get JDB version info and available features. |
 
 ### Execution Control
@@ -263,6 +313,9 @@ project root (this file can be committed to version control so all team members 
 | Tool | Description |
 |------|-------------|
 | `jdb_exclude` | Set/display step exclusion filter (skip library classes when stepping). |
+
+**Note:** All debugging tools accept an optional `port` parameter. When only one session
+is active, it auto-resolves. When multiple sessions are active, `port` is required.
 
 ## Configuration
 
