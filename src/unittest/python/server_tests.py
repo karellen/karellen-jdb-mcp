@@ -19,11 +19,13 @@ from unittest.mock import patch, MagicMock
 from mcp.server.fastmcp.exceptions import ToolError
 
 from karellen_jdb_mcp.jdb_session import JdbSessionError
+from karellen_jdb_mcp.process_manager import ProcessManagerError
 from karellen_jdb_mcp.types import (
     BreakpointInfo, StopEvent,
     ClassInfo, LockInfo, ThreadLockInfo,
     MonitorInfo, EvalResult, ConnectStatus, StringResult,
     VersionInfo, ExceptionBreakInfo, WatchpointInfo,
+    LaunchResult, ProcessStatus, SessionInfo,
 )
 import karellen_jdb_mcp.server as server
 
@@ -76,7 +78,7 @@ class TagErrorsDecoratorTests(unittest.TestCase):
 
 class RequireSessionTests(unittest.TestCase):
     def setUp(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
     def test_no_session_raises(self):
         with self.assertRaises(JdbSessionError):
@@ -85,23 +87,57 @@ class RequireSessionTests(unittest.TestCase):
     def test_disconnected_session_raises(self):
         mock_session = MagicMock()
         mock_session.is_connected.return_value = False
-        server._jdb_session = mock_session
+        server._jdb_sessions = {5005: mock_session}
         with self.assertRaises(JdbSessionError):
             server._require_session()
 
     def test_connected_session_returns(self):
         mock_session = MagicMock()
         mock_session.is_connected.return_value = True
-        server._jdb_session = mock_session
+        server._jdb_sessions = {5005: mock_session}
         self.assertIs(server._require_session(), mock_session)
 
+    def test_single_session_auto_resolves(self):
+        mock_session = MagicMock()
+        mock_session.is_connected.return_value = True
+        server._jdb_sessions = {9876: mock_session}
+        self.assertIs(server._require_session(), mock_session)
+
+    def test_multiple_sessions_requires_port(self):
+        s1 = MagicMock()
+        s1.is_connected.return_value = True
+        s2 = MagicMock()
+        s2.is_connected.return_value = True
+        server._jdb_sessions = {5005: s1, 5006: s2}
+        with self.assertRaises(JdbSessionError) as ctx:
+            server._require_session()
+        self.assertIn("Multiple", str(ctx.exception))
+        self.assertIn("5005", str(ctx.exception))
+        self.assertIn("5006", str(ctx.exception))
+
+    def test_multiple_sessions_with_port(self):
+        s1 = MagicMock()
+        s1.is_connected.return_value = True
+        s2 = MagicMock()
+        s2.is_connected.return_value = True
+        server._jdb_sessions = {5005: s1, 5006: s2}
+        self.assertIs(server._require_session(5006), s2)
+
+    def test_port_not_found_raises(self):
+        s1 = MagicMock()
+        s1.is_connected.return_value = True
+        server._jdb_sessions = {5005: s1}
+        with self.assertRaises(JdbSessionError) as ctx:
+            server._require_session(9999)
+        self.assertIn("9999", str(ctx.exception))
+
     def tearDown(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
 
 class ConnectToolTests(unittest.TestCase):
     def setUp(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
     @patch("karellen_jdb_mcp.server.JdbSession")
     def test_connect_success(self, mock_cls):
@@ -128,9 +164,9 @@ class ConnectToolTests(unittest.TestCase):
             wait_timeout=0)
 
     def test_connect_already_active(self):
-        server._jdb_session = MagicMock()
+        server._jdb_sessions = {5005: MagicMock()}
         with self.assertRaises(ToolError) as ctx:
-            server.jdb_connect()
+            server.jdb_connect(port=5005)
         self.assertIn("already active", str(ctx.exception))
 
     @patch("karellen_jdb_mcp.server.JdbSession")
@@ -140,16 +176,16 @@ class ConnectToolTests(unittest.TestCase):
         mock_cls.return_value = mock_session
 
         with self.assertRaises(ToolError):
-            server.jdb_connect()
+            server.jdb_connect(port=5005)
         mock_session.close.assert_called_once()
 
     def tearDown(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
 
 class DisconnectToolTests(unittest.TestCase):
     def setUp(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
     def test_disconnect_no_session(self):
         result = server.jdb_disconnect()
@@ -157,21 +193,66 @@ class DisconnectToolTests(unittest.TestCase):
         self.assertIn("No active", result.result)
 
     def test_disconnect_active_session(self):
-        server._jdb_session = MagicMock()
+        server._jdb_sessions = {5005: MagicMock()}
         result = server.jdb_disconnect()
         self.assertIsInstance(result, StringResult)
         self.assertIn("closed", result.result)
-        self.assertIsNone(server._jdb_session)
+        self.assertEqual(len(server._jdb_sessions), 0)
 
     def tearDown(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
+
+
+class SessionListToolTests(unittest.TestCase):
+    def setUp(self):
+        server._jdb_sessions = {}
+
+    def test_empty(self):
+        result = server.jdb_session_list()
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 0)
+
+    def test_single_session(self):
+        mock_session = MagicMock()
+        mock_session.is_connected.return_value = True
+        mock_session.version_info = VersionInfo(
+            jdb_version_string="jdb 21",
+            jdk_major_version=21,
+            has_stop_modifiers=True,
+            has_repeat_command=True,
+            has_threadgroup_reset=True,
+            has_track_all_threads=True,
+        )
+        server._jdb_sessions = {5005: mock_session}
+        result = server.jdb_session_list()
+        self.assertEqual(len(result), 1)
+        self.assertIsInstance(result[0], SessionInfo)
+        self.assertEqual(result[0].port, 5005)
+        self.assertTrue(result[0].connected)
+        self.assertEqual(result[0].jdk_major_version, 21)
+
+    def test_multiple_sessions(self):
+        s1 = MagicMock()
+        s1.is_connected.return_value = True
+        s1.version_info = MagicMock(jdb_version_string="jdb 21", jdk_major_version=21)
+        s2 = MagicMock()
+        s2.is_connected.return_value = True
+        s2.version_info = MagicMock(jdb_version_string="jdb 17", jdk_major_version=17)
+        server._jdb_sessions = {5005: s1, 5006: s2}
+        result = server.jdb_session_list()
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].port, 5005)
+        self.assertEqual(result[1].port, 5006)
+
+    def tearDown(self):
+        server._jdb_sessions = {}
 
 
 class ExecutionToolTests(unittest.TestCase):
     def setUp(self):
         self.mock_session = MagicMock()
         self.mock_session.is_connected.return_value = True
-        server._jdb_session = self.mock_session
+        server._jdb_sessions = {5005: self.mock_session}
 
     def test_run(self):
         self.mock_session.run.return_value = (
@@ -217,7 +298,7 @@ class ExecutionToolTests(unittest.TestCase):
         self.assertIn("jdb:", str(ctx.exception))
 
     def tearDown(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
 
 class BreakpointToolTests(unittest.TestCase):
@@ -232,7 +313,7 @@ class BreakpointToolTests(unittest.TestCase):
             has_threadgroup_reset=True,
             has_track_all_threads=True,
         )
-        server._jdb_session = self.mock_session
+        server._jdb_sessions = {5005: self.mock_session}
 
     def test_set_breakpoint(self):
         self.mock_session.breakpoint_set.return_value = "Set breakpoint com.example.Main:42\n"
@@ -274,14 +355,14 @@ class BreakpointToolTests(unittest.TestCase):
         self.assertIsInstance(result, StringResult)
 
     def tearDown(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
 
 class CatchToolTests(unittest.TestCase):
     def setUp(self):
         self.mock_session = MagicMock()
         self.mock_session.is_connected.return_value = True
-        server._jdb_session = self.mock_session
+        server._jdb_sessions = {5005: self.mock_session}
 
     def test_catch_success(self):
         self.mock_session.catch.return_value = "Set all java.lang.NullPointerException\n"
@@ -295,14 +376,14 @@ class CatchToolTests(unittest.TestCase):
             server.jdb_catch("nonexistent.Class")
 
     def tearDown(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
 
 class WatchToolTests(unittest.TestCase):
     def setUp(self):
         self.mock_session = MagicMock()
         self.mock_session.is_connected.return_value = True
-        server._jdb_session = self.mock_session
+        server._jdb_sessions = {5005: self.mock_session}
 
     def test_watch_success(self):
         self.mock_session.watch.return_value = "Set watch com.example.Main.counter\n"
@@ -316,14 +397,14 @@ class WatchToolTests(unittest.TestCase):
             server.jdb_watch("com.example.Main.nonexistent")
 
     def tearDown(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
 
 class InspectionToolTests(unittest.TestCase):
     def setUp(self):
         self.mock_session = MagicMock()
         self.mock_session.is_connected.return_value = True
-        server._jdb_session = self.mock_session
+        server._jdb_sessions = {5005: self.mock_session}
 
     def test_where(self):
         self.mock_session.where.return_value = (
@@ -396,14 +477,14 @@ class InspectionToolTests(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
     def tearDown(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
 
 class ThreadToolTests(unittest.TestCase):
     def setUp(self):
         self.mock_session = MagicMock()
         self.mock_session.is_connected.return_value = True
-        server._jdb_session = self.mock_session
+        server._jdb_sessions = {5005: self.mock_session}
 
     def test_threads(self):
         self.mock_session.threads.return_value = (
@@ -433,14 +514,14 @@ class ThreadToolTests(unittest.TestCase):
         self.assertIsInstance(result, StringResult)
 
     def tearDown(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
 
 class ConcurrencyToolTests(unittest.TestCase):
     def setUp(self):
         self.mock_session = MagicMock()
         self.mock_session.is_connected.return_value = True
-        server._jdb_session = self.mock_session
+        server._jdb_sessions = {5005: self.mock_session}
 
     def test_lock(self):
         self.mock_session.lock.return_value = (
@@ -465,14 +546,14 @@ class ConcurrencyToolTests(unittest.TestCase):
         self.assertEqual(len(result.owned_monitors), 2)
 
     def tearDown(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
 
 class MonitorToolTests(unittest.TestCase):
     def setUp(self):
         self.mock_session = MagicMock()
         self.mock_session.is_connected.return_value = True
-        server._jdb_session = self.mock_session
+        server._jdb_sessions = {5005: self.mock_session}
 
     def test_monitor_set(self):
         self.mock_session.monitor.return_value = "Set monitor 1: locals\n"
@@ -493,13 +574,93 @@ class MonitorToolTests(unittest.TestCase):
         self.assertIsInstance(result, StringResult)
 
     def tearDown(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
+
+
+class LaunchToolTests(unittest.TestCase):
+    def setUp(self):
+        self._orig_manager = server._process_manager
+        server._process_manager = MagicMock()
+
+    def test_launch(self):
+        mock_managed = MagicMock()
+        mock_managed.port = 9876
+        mock_managed.pid = 5555
+        mock_managed.command = ["java", "-agentlib:jdwp=address=*:9876", "Main"]
+        server._process_manager.launch.return_value = mock_managed
+
+        result = server.jdb_launch(["java", "-agentlib:jdwp=address=*:${JDB_PORT}", "Main"])
+        self.assertIsInstance(result, LaunchResult)
+        self.assertEqual(result.port, 9876)
+        self.assertEqual(result.pid, 5555)
+        server._process_manager.launch.assert_called_once()
+
+    def test_launch_list(self):
+        m1 = MagicMock()
+        m1.port = 9001
+        m1.pid = 100
+        m1.command = ["java", "App1"]
+        m1.is_running.return_value = True
+        m1.exit_code.return_value = None
+        m2 = MagicMock()
+        m2.port = 9002
+        m2.pid = 101
+        m2.command = ["java", "App2"]
+        m2.is_running.return_value = False
+        m2.exit_code.return_value = 1
+        server._process_manager.list_all.return_value = [m1, m2]
+
+        result = server.jdb_launch_list()
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)
+        self.assertTrue(result[0].running)
+        self.assertFalse(result[1].running)
+        self.assertEqual(result[1].exit_code, 1)
+
+    def test_launch_status(self):
+        mock_managed = MagicMock()
+        mock_managed.port = 9001
+        mock_managed.pid = 100
+        mock_managed.command = ["java", "Main"]
+        mock_managed.is_running.return_value = True
+        mock_managed.exit_code.return_value = None
+        server._process_manager.get.return_value = mock_managed
+
+        result = server.jdb_launch_status(9001)
+        self.assertIsInstance(result, ProcessStatus)
+        self.assertEqual(result.port, 9001)
+        self.assertTrue(result.running)
+
+    def test_launch_status_not_found(self):
+        server._process_manager.get.return_value = None
+        with self.assertRaises(ToolError) as ctx:
+            server.jdb_launch_status(9999)
+        self.assertIn("process:", str(ctx.exception))
+
+    def test_launch_stop(self):
+        mock_managed = MagicMock()
+        mock_managed.pid = 100
+        server._process_manager.stop.return_value = mock_managed
+
+        result = server.jdb_launch_stop(9001)
+        self.assertIsInstance(result, StringResult)
+        self.assertIn("Stopped", result.result)
+        server._process_manager.stop.assert_called_once_with(9001)
+
+    def test_launch_stop_not_found(self):
+        server._process_manager.stop.side_effect = ProcessManagerError("No managed process on port 9999")
+        with self.assertRaises(ToolError) as ctx:
+            server.jdb_launch_stop(9999)
+        self.assertIn("process:", str(ctx.exception))
+
+    def tearDown(self):
+        server._process_manager = self._orig_manager
 
 
 class NoSessionToolTests(unittest.TestCase):
     """Verify tools raise ToolError when no session is active."""
     def setUp(self):
-        server._jdb_session = None
+        server._jdb_sessions = {}
 
     def test_breakpoint_set_no_session(self):
         with self.assertRaises(ToolError) as ctx:

@@ -82,14 +82,33 @@ JAVA_TOOL_OPTIONS="-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address
 
 ## Workflow
 
-### 1. Start the JVM and Connect
+### 1. Launch the JVM and Connect
 
-1. Launch the JVM with the appropriate debug stanza from above (run the command in the
-   background or in a separate Bash call).
-2. Connect JDB:
+Use `jdb_launch` to start the JVM with `${JDB_PORT}` substitution (allocates a random port):
 ```
-jdb_connect(host="localhost", port=5005)
+jdb_launch(["java", "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${JDB_PORT}",
+            "-cp", "target/classes", "com.example.Main"])
 ```
+
+Or for Maven tests:
+```
+jdb_launch(["mvn", "test",
+            "-Dmaven.surefire.debug=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:${JDB_PORT}"])
+```
+
+Then connect with `wait_timeout` to wait for the JVM to start. When there is exactly
+one launched process, `jdb_connect` auto-resolves the port — no need to pass it:
+```
+jdb_connect(wait_timeout=30)
+```
+
+If you launched multiple JVMs or are connecting to a manually started JVM, specify the port:
+```
+jdb_connect(port=5005, wait_timeout=30)
+```
+
+Similarly, all debugging tools auto-resolve the port when only one session is active.
+When multiple sessions are active, pass `port=` to select which session to use.
 
 Pass `jdb_path` if jdb is not on PATH. Pass `sourcepath` to enable source listing.
 Pass `trackallthreads=True` on JDK 20+ to track virtual threads.
@@ -158,16 +177,31 @@ For deadlock analysis:
 - `jdb_lock("objectRef")` — see who owns a lock and who's waiting
 - `jdb_thread("threadId")` then `jdb_where()` — inspect each thread's stack
 
-### 8. Clean Up
+### 8. Managing Sessions and Processes
+
+- `jdb_session_list()` — list all active debug sessions with port and JDK version
+- `jdb_launch_list()` — list all launched JVM processes with status
+- `jdb_launch_status(port=<port>)` — check if a specific launched process is still running
+
+### 9. Clean Up
 
 ```
 jdb_disconnect()
+jdb_launch_stop(port=<port>)
+```
+
+Or when debugging multiple JVMs:
+```
+jdb_disconnect(port=<port>)
+jdb_launch_stop(port=<port>)
 ```
 
 ## Key Rules
 
-- **Always connect before using any other tools.** All tools except `jdb_connect` require
-  an active session.
+- **Use `jdb_launch` to start JVMs** rather than Bash. It handles port allocation,
+  `${JDB_PORT}` substitution, and process detachment.
+- **Always connect before using any other tools.** All tools except `jdb_connect`,
+  `jdb_launch*`, and `jdb_session_list` require an active session.
 - **Set breakpoints before running** if you need to stop at a specific point during startup.
 - **Use `jdb_catch` for exception debugging** — it's more effective than guessing where to
   set breakpoints.

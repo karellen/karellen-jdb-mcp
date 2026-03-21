@@ -1,6 +1,6 @@
 {
   "name": "karellen-jdb-mcp",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "JDB (Java Debugger) for Claude Code via MCP - attach to running JVMs and debug with breakpoints, expression evaluation, thread inspection, and class introspection",
   "author": {
     "name": "Karellen, Inc.",
