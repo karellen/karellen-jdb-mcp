@@ -19,6 +19,7 @@ import logging
 import os
 import queue
 import re
+import socket
 import subprocess
 import threading
 import time
@@ -42,6 +43,9 @@ def _env_timeout(name, default):
 TIMEOUT_CONNECT = _env_timeout("JDB_MCP_TIMEOUT_CONNECT", 60)
 TIMEOUT_COMMAND = _env_timeout("JDB_MCP_TIMEOUT_COMMAND", 30)
 TIMEOUT_EXECUTION = _env_timeout("JDB_MCP_TIMEOUT_EXECUTION", 120)
+
+PORT_POLL_INTERVAL = 1.0
+JDB_ATTACH_TIMEOUT = 15
 
 # JDB prompt patterns:
 # "> " (initial prompt before run)
@@ -84,7 +88,7 @@ class JdbSession:
         return self._connected
 
     def connect(self, jdb_path, host, port, sourcepath=None, classpath=None,
-                trackallthreads=False):
+                trackallthreads=False, wait_timeout=0):
         """Start JDB and attach to a running JVM.
 
         Args:
@@ -94,6 +98,10 @@ class JdbSession:
             sourcepath: Colon-separated source directories.
             classpath: Colon-separated class directories.
             trackallthreads: Track all threads including virtual (JDK 20+).
+            wait_timeout: Seconds to wait for the JDWP port to become available.
+                0 means no waiting (fail immediately if port is not open).
+                When set, polls the port and retries JDB attach until the JVM
+                is ready or the timeout expires.
         """
         self._version_info = detect_version(jdb_path)
 
@@ -109,25 +117,59 @@ class JdbSession:
                 logger.warning("-trackallthreads not supported on JDK %d",
                                self._version_info.jdk_major_version)
 
-        logger.info("Starting JDB: %s", cmd)
-        self._process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            bufsize=0,
-        )
-        self._closed = False
-        self._start_reader()
+        deadline = time.monotonic() + wait_timeout
 
-        try:
-            initial_output = self._read_until_prompt(timeout=TIMEOUT_CONNECT)
-            logger.info("JDB connected. Initial output: %s", initial_output[:200])
-        except JdbSessionError:
-            self.close()
-            raise
+        while True:
+            # Wait for port to accept TCP connections before spawning JDB
+            if wait_timeout > 0:
+                if not self._wait_for_port(host, port, deadline):
+                    raise JdbSessionError(
+                        "JDWP port %s:%d did not open within %ds"
+                        % (host, port, wait_timeout))
 
-        self._connected = True
+            logger.info("Starting JDB: %s", cmd)
+            self._process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                bufsize=0,
+            )
+            self._closed = False
+            self._stream_ended = False
+            self._line_queue = queue.Queue()
+            self._start_reader()
+
+            try:
+                attach_timeout = min(JDB_ATTACH_TIMEOUT, max(1, deadline - time.monotonic())) \
+                    if wait_timeout > 0 else TIMEOUT_CONNECT
+                initial_output = self._read_until_prompt(timeout=attach_timeout)
+                logger.info("JDB connected. Initial output: %s", initial_output[:200])
+                self._connected = True
+                return
+            except JdbSessionError as e:
+                self.close()
+
+                if wait_timeout <= 0 or time.monotonic() >= deadline:
+                    raise
+
+                logger.info("JDB attach failed (%s), retrying...", e)
+                time.sleep(PORT_POLL_INTERVAL)
+
+    def _wait_for_port(self, host, port, deadline):
+        """Poll until a TCP connection to host:port succeeds or deadline expires."""
+        while time.monotonic() < deadline:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(min(PORT_POLL_INTERVAL, max(0.1, deadline - time.monotonic())))
+                    s.connect((host, port))
+                    return True
+            except (ConnectionRefusedError, OSError, socket.timeout):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(PORT_POLL_INTERVAL, remaining))
+        return False
 
     def send_command(self, command, timeout=TIMEOUT_COMMAND):
         """Send a command to JDB and return all output until the next prompt.

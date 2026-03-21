@@ -122,7 +122,8 @@ def _parse_stop(output):
 def jdb_connect(jdb_path: str = "jdb", host: str = "localhost",
                 port: int = 5005, sourcepath: str = None,
                 classpath: str = None,
-                trackallthreads: bool = False) -> ConnectStatus:
+                trackallthreads: bool = False,
+                wait_timeout: int = 0) -> ConnectStatus:
     """Connect to a running JVM via JDWP. The JVM must be started with:
     java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=*:<port> ...
 
@@ -133,6 +134,10 @@ def jdb_connect(jdb_path: str = "jdb", host: str = "localhost",
         sourcepath: Colon-separated source directories for source listing.
         classpath: Colon-separated class directories.
         trackallthreads: Track all threads including virtual threads (JDK 20+).
+        wait_timeout: Seconds to wait for the JDWP port to become available
+            (default: 0 = fail immediately if not open). Set this when you just
+            launched the JVM in the background and need to wait for it to start.
+            Handles both port-not-yet-open and port-open-but-JDWP-not-ready cases.
     """
     global _jdb_session
     if _jdb_session is not None:
@@ -141,7 +146,8 @@ def jdb_connect(jdb_path: str = "jdb", host: str = "localhost",
     session = JdbSession()
     try:
         session.connect(jdb_path, host, port, sourcepath=sourcepath,
-                        classpath=classpath, trackallthreads=trackallthreads)
+                        classpath=classpath, trackallthreads=trackallthreads,
+                        wait_timeout=wait_timeout)
     except (JdbSessionError, FileNotFoundError, ValueError):
         try:
             session.close()

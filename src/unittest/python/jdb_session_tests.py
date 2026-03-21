@@ -14,7 +14,7 @@
 #   limitations under the License.
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from karellen_jdb_mcp.jdb_session import JdbSession, JdbSessionError, PROMPT_RE
 
@@ -357,6 +357,118 @@ class JdbSessionCloseTests(unittest.TestCase):
     def test_close_when_not_connected(self):
         session = JdbSession()
         session.close()  # should not raise
+
+
+class WaitForPortTests(unittest.TestCase):
+    def _make_mock_socket(self, mock_sock_cls):
+        mock_sock = MagicMock()
+        mock_sock_cls.return_value.__enter__ = MagicMock(return_value=mock_sock)
+        mock_sock_cls.return_value.__exit__ = MagicMock(return_value=False)
+        return mock_sock
+
+    @patch("karellen_jdb_mcp.jdb_session.time.sleep")
+    @patch("karellen_jdb_mcp.jdb_session.socket.socket")
+    def test_port_open_immediately(self, mock_sock_cls, _mock_sleep):
+        session = JdbSession()
+        import time
+        deadline = time.monotonic() + 5
+        mock_sock = self._make_mock_socket(mock_sock_cls)
+        mock_sock.connect.return_value = None
+        result = session._wait_for_port("localhost", 5005, deadline)
+        self.assertTrue(result)
+
+    @patch("karellen_jdb_mcp.jdb_session.time.sleep")
+    @patch("karellen_jdb_mcp.jdb_session.socket.socket")
+    def test_port_not_open_timeout(self, mock_sock_cls, _mock_sleep):
+        session = JdbSession()
+        mock_sock = self._make_mock_socket(mock_sock_cls)
+        mock_sock.connect.side_effect = ConnectionRefusedError()
+        import time
+        # Deadline already in the past
+        result = session._wait_for_port("localhost", 5005, time.monotonic() - 1)
+        self.assertFalse(result)
+
+    @patch("karellen_jdb_mcp.jdb_session.time.sleep")
+    @patch("karellen_jdb_mcp.jdb_session.socket.socket")
+    def test_port_opens_after_retries(self, mock_sock_cls, _mock_sleep):
+        session = JdbSession()
+        import time
+        deadline = time.monotonic() + 10
+        call_count = [0]
+
+        def connect_side_effect(addr):
+            call_count[0] += 1
+            if call_count[0] < 3:
+                raise ConnectionRefusedError()
+
+        mock_sock = self._make_mock_socket(mock_sock_cls)
+        mock_sock.connect.side_effect = connect_side_effect
+        result = session._wait_for_port("localhost", 5005, deadline)
+        self.assertTrue(result)
+        self.assertEqual(call_count[0], 3)
+
+
+class ConnectWithWaitTimeoutTests(unittest.TestCase):
+    def _make_version_info(self):
+        from karellen_jdb_mcp.types import VersionInfo
+        return VersionInfo(
+            jdb_version_string="jdb 21",
+            jdk_major_version=21,
+            has_stop_modifiers=True,
+            has_repeat_command=True,
+            has_threadgroup_reset=True,
+            has_track_all_threads=True,
+        )
+
+    def _make_mock_proc(self):
+        mock_proc = MagicMock()
+        # stdout.read must return b"" to stop the reader thread immediately
+        mock_proc.stdout.read.return_value = b""
+        mock_proc.stdin = MagicMock()
+        mock_proc.poll.return_value = None
+        return mock_proc
+
+    @patch("karellen_jdb_mcp.jdb_session.detect_version")
+    @patch("karellen_jdb_mcp.jdb_session.subprocess.Popen")
+    def test_connect_no_wait_timeout(self, mock_popen, mock_detect):
+        mock_detect.return_value = self._make_version_info()
+        mock_popen.return_value = self._make_mock_proc()
+
+        session = JdbSession()
+        with patch.object(session, '_read_until_prompt', return_value="Initializing jdb..."):
+            session.connect("jdb", "localhost", 5005)
+            self.assertTrue(session.is_connected())
+
+    @patch("karellen_jdb_mcp.jdb_session.detect_version")
+    @patch("karellen_jdb_mcp.jdb_session.subprocess.Popen")
+    def test_connect_with_wait_timeout_retries_on_attach_failure(self, mock_popen, mock_detect):
+        mock_detect.return_value = self._make_version_info()
+        mock_popen.return_value = self._make_mock_proc()
+
+        session = JdbSession()
+        call_count = [0]
+
+        def read_side_effect(timeout):
+            call_count[0] += 1
+            if call_count[0] < 3:
+                raise JdbSessionError("Timeout")
+            return "Initializing jdb..."
+
+        with patch.object(session, '_wait_for_port', return_value=True):
+            with patch.object(session, '_read_until_prompt', side_effect=read_side_effect):
+                with patch("karellen_jdb_mcp.jdb_session.time.sleep"):
+                    session.connect("jdb", "localhost", 5005, wait_timeout=30)
+                    self.assertTrue(session.is_connected())
+                    self.assertEqual(call_count[0], 3)
+
+    @patch("karellen_jdb_mcp.jdb_session.detect_version")
+    def test_connect_with_wait_timeout_port_never_opens(self, mock_detect):
+        mock_detect.return_value = self._make_version_info()
+        session = JdbSession()
+        with patch.object(session, '_wait_for_port', return_value=False):
+            with self.assertRaises(JdbSessionError) as ctx:
+                session.connect("jdb", "localhost", 5005, wait_timeout=1)
+            self.assertIn("did not open", str(ctx.exception))
 
 
 class StripPromptTests(unittest.TestCase):
