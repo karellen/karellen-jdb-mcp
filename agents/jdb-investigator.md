@@ -41,7 +41,10 @@ jdb_connect(port=<returned_port>, wait_timeout=30)
 2. **Connect** with `jdb_connect(wait_timeout=30)` (port auto-resolves for single launch)
 3. **Set exception breakpoints** with `jdb_catch` for exception-related bugs, or
    set line/method breakpoints with `jdb_breakpoint_set` for logic bugs
-4. **Run or continue** execution with `jdb_run` or `jdb_cont`
+4. **Run or continue** execution with `jdb_run` or `jdb_cont`. These are fire-and-forget:
+   they return immediately once the JVM resumes. If a breakpoint/exception is hit within
+   a few seconds, the stop event is returned directly. Otherwise, `reason="resumed"` is
+   returned — call `jdb_wait_for_event(timeout=120)` to block until the next stop event.
 5. **Examine state** at the failure: `jdb_where` for call stack, `jdb_locals` for
    variables, `jdb_print`/`jdb_dump` for expressions and objects
 6. **Navigate** with `jdb_step`, `jdb_next`, `jdb_step_up` to trace execution
@@ -54,7 +57,9 @@ jdb_connect(port=<returned_port>, wait_timeout=30)
 
 ### For Exceptions
 1. `jdb_catch("*", filter_type="uncaught")` to break on uncaught exceptions
-2. `jdb_cont()` to run until the exception
+2. `jdb_cont()` to resume execution. If the exception is hit quickly, the stop event
+   is returned directly. If `reason="resumed"`, call `jdb_wait_for_event()` to block
+   until the exception fires.
 3. `jdb_where()` to see where it happened
 4. `jdb_locals()` and `jdb_print("expr")` to understand why
 

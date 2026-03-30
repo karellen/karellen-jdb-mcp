@@ -286,6 +286,49 @@ class ExecutionToolTests(unittest.TestCase):
         result = server.jdb_step_up()
         self.assertIsInstance(result, StopEvent)
 
+    def test_cont_resumed(self):
+        self.mock_session.cont.return_value = ""
+        result = server.jdb_cont()
+        self.assertIsInstance(result, StopEvent)
+        self.assertEqual(result.reason, "resumed")
+
+    def test_cont_nothing_suspended(self):
+        self.mock_session.cont.return_value = "Nothing suspended."
+        result = server.jdb_cont()
+        self.assertIsInstance(result, StopEvent)
+        self.assertEqual(result.reason, "completed")
+        self.assertIn("Nothing suspended", result.location)
+
+    def test_run_resumed(self):
+        self.mock_session.run.return_value = ""
+        result = server.jdb_run()
+        self.assertIsInstance(result, StopEvent)
+        self.assertEqual(result.reason, "resumed")
+
+    def test_step_resumed(self):
+        self.mock_session.step.return_value = ""
+        result = server.jdb_step()
+        self.assertIsInstance(result, StopEvent)
+        self.assertEqual(result.reason, "resumed")
+
+    def test_wait_for_event_breakpoint(self):
+        self.mock_session.wait_for_event.return_value = (
+            'Breakpoint hit: "thread=main", com.example.Main.foo(), line=42 bci=0\n')
+        result = server.jdb_wait_for_event()
+        self.assertIsInstance(result, StopEvent)
+        self.assertEqual(result.reason, "breakpoint_hit")
+
+    def test_wait_for_event_timeout(self):
+        self.mock_session.wait_for_event.return_value = ""
+        result = server.jdb_wait_for_event(timeout=5)
+        self.assertIsInstance(result, StopEvent)
+        self.assertEqual(result.reason, "resumed")
+
+    def test_wait_for_event_custom_timeout(self):
+        self.mock_session.wait_for_event.return_value = ""
+        server.jdb_wait_for_event(timeout=300)
+        self.mock_session.wait_for_event.assert_called_once_with(timeout=300)
+
     def test_cont_error(self):
         self.mock_session.cont.return_value = "** Not at a breakpoint\n"
         with self.assertRaises(ToolError):

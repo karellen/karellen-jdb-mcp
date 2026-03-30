@@ -135,14 +135,25 @@ jdb_watch("com.example.MyClass.myField", access_type="access")  # break on field
 
 ### 3. Start or Resume Execution
 
+Execution commands are **fire-and-forget**: they return immediately once the JVM resumes.
+If a breakpoint or exception is hit within a few seconds, the stop event is returned
+directly. Otherwise, the tool returns `reason="resumed"` and you should use
+`jdb_suspend()` or wait for the next breakpoint to examine state.
+
 If the JVM was started with `suspend=y`:
 ```
-jdb_run()      # start execution
+jdb_run()      # start execution (returns immediately)
 ```
 
 Or if already running:
 ```
-jdb_cont()     # continue to next breakpoint/exception
+jdb_cont()     # continue execution (returns immediately)
+```
+
+If `jdb_run` or `jdb_cont` returns `reason="resumed"`, call `jdb_wait_for_event` to
+block until the next breakpoint, exception, or program exit:
+```
+jdb_wait_for_event(timeout=120)   # blocks until stop event or timeout
 ```
 
 ### 4. Examine State

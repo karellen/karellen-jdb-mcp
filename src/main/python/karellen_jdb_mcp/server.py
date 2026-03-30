@@ -139,7 +139,12 @@ def _parse_stop(output):
     text protocol can produce valid execution results without a structured stop
     event pattern. In that case, a synthetic StopEvent with the raw output is
     returned so the caller always gets a result.
+
+    Empty output indicates the JVM resumed execution without an immediate stop
+    event (e.g. cont with no breakpoint hit within the timeout window).
     """
+    if not output:
+        return StopEvent(reason="resumed", location="Execution resumed.")
     event = parser.parse_stop_event(output)
     if event is None:
         logger.debug("No structured stop event in output: %s", output[:200])
@@ -396,6 +401,26 @@ def jdb_step_up(port: int = None) -> StopEvent:
     """Step out: execute until the current method returns to its caller."""
     session = _require_session(port)
     output = session.step_up()
+    _check_error(output)
+    return _parse_stop(output)
+
+
+@mcp.tool()
+@_tag_errors
+def jdb_wait_for_event(timeout: int = 120, port: int = None) -> StopEvent:
+    """Wait for a stop event from a previously resumed execution.
+
+    Call this after jdb_cont or jdb_run when they return reason="resumed"
+    (meaning the JVM resumed execution but no breakpoint/exception was hit
+    within the initial window). This tool blocks until a stop event occurs
+    (breakpoint hit, exception thrown, program exit) or the timeout expires.
+
+    Args:
+        timeout: Maximum seconds to wait for an event (default: 120).
+        port: Port of the session. Optional if only one session is active.
+    """
+    session = _require_session(port)
+    output = session.wait_for_event(timeout=timeout)
     _check_error(output)
     return _parse_stop(output)
 
