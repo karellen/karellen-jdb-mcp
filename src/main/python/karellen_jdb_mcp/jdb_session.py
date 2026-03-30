@@ -43,6 +43,7 @@ def _env_timeout(name, default):
 TIMEOUT_CONNECT = _env_timeout("JDB_MCP_TIMEOUT_CONNECT", 60)
 TIMEOUT_COMMAND = _env_timeout("JDB_MCP_TIMEOUT_COMMAND", 30)
 TIMEOUT_EXECUTION = _env_timeout("JDB_MCP_TIMEOUT_EXECUTION", 120)
+TIMEOUT_RESUME = _env_timeout("JDB_MCP_TIMEOUT_RESUME", 5)
 
 PORT_POLL_INTERVAL = 1.0
 JDB_ATTACH_TIMEOUT = 15
@@ -66,6 +67,10 @@ _STREAM_ENDED = object()
 
 
 class JdbSessionError(Exception):
+    pass
+
+
+class JdbTimeoutError(JdbSessionError):
     pass
 
 
@@ -242,7 +247,7 @@ class JdbSession:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 text = buf.decode("utf-8", errors="replace")
-                raise JdbSessionError(
+                raise JdbTimeoutError(
                     "Timeout waiting for JDB prompt after %ds. Output so far: %s"
                     % (timeout, text[:500]))
 
@@ -348,6 +353,138 @@ class JdbSession:
     # --- Convenience Methods ---
     # Each returns raw JDB text output for the parser layer.
 
+    def _send_execution_command(self, command):
+        """Send a command that may resume JVM execution.
+
+        Unlike send_command, this does not require a JDB prompt to return.
+        It collects whatever output JDB produces and returns once data stops
+        flowing (PROMPT_SETTLE_TIME of silence). If no output arrives within
+        TIMEOUT_RESUME, returns empty string (execution resumed, fire-and-forget).
+
+        This avoids the prompt detection issue where JDB's response format
+        (e.g. "> Nothing suspended.") doesn't end with a recognizable prompt.
+        """
+        if not self._connected or self._process is None:
+            raise JdbSessionError("Not connected to JDB")
+
+        if self._process.poll() is not None:
+            self._connected = False
+            raise JdbSessionError("JDB process has exited")
+
+        logger.debug("JDB execution command: %s", command)
+        try:
+            self._process.stdin.write((command + "\n").encode())
+            self._process.stdin.flush()
+        except (BrokenPipeError, OSError) as e:
+            self._connected = False
+            raise JdbSessionError("Failed to send command: %s" % e) from e
+
+        buf = b""
+        deadline = time.monotonic() + TIMEOUT_RESUME
+        last_data_time = time.monotonic()
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            try:
+                chunk = self._line_queue.get(
+                    timeout=min(remaining, PROMPT_SETTLE_TIME))
+            except queue.Empty:
+                if buf and (time.monotonic() - last_data_time
+                            >= PROMPT_SETTLE_TIME):
+                    break
+                continue
+
+            if chunk is _STREAM_ENDED:
+                self._stream_ended = True
+                break
+
+            buf += chunk
+            last_data_time = time.monotonic()
+
+            # If prompt detected, return immediately
+            text = buf.decode("utf-8", errors="replace")
+            prompt_result = self._strip_prompt(text)
+            if prompt_result is not None:
+                logger.debug("JDB execution response (prompt): %s",
+                             prompt_result[:500])
+                return prompt_result
+
+        text = buf.decode("utf-8", errors="replace")
+        # Strip prompt if present, otherwise return raw output
+        result = self._strip_prompt(text)
+        if result is not None:
+            logger.debug("JDB execution response (prompt): %s", result[:500])
+            return result
+        logger.debug("JDB execution response (raw): %s", text[:500])
+        return text
+
+    def wait_for_event(self, timeout=TIMEOUT_EXECUTION):
+        """Wait for a stop event from a previously resumed execution.
+
+        Blocks until JDB produces output (breakpoint hit, exception, program
+        exit) or the timeout expires. Does not send any command — it only
+        reads from the output queue.
+
+        Args:
+            timeout: Maximum seconds to wait for an event.
+
+        Returns:
+            Raw JDB output text, or empty string if timeout expired with
+            no output.
+        """
+        if not self._connected or self._process is None:
+            raise JdbSessionError("Not connected to JDB")
+
+        if self._process.poll() is not None:
+            self._connected = False
+            raise JdbSessionError("JDB process has exited")
+
+        buf = b""
+        deadline = time.monotonic() + timeout
+        last_data_time = None
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            try:
+                chunk = self._line_queue.get(
+                    timeout=min(remaining, PROMPT_SETTLE_TIME))
+            except queue.Empty:
+                if buf and last_data_time is not None and (
+                        time.monotonic() - last_data_time
+                        >= PROMPT_SETTLE_TIME):
+                    break
+                continue
+
+            if chunk is _STREAM_ENDED:
+                self._stream_ended = True
+                break
+
+            buf += chunk
+            last_data_time = time.monotonic()
+
+            # If prompt detected, return immediately
+            text = buf.decode("utf-8", errors="replace")
+            prompt_result = self._strip_prompt(text)
+            if prompt_result is not None:
+                logger.debug("JDB wait_for_event response (prompt): %s",
+                             prompt_result[:500])
+                return prompt_result
+
+        text = buf.decode("utf-8", errors="replace")
+        result = self._strip_prompt(text)
+        if result is not None:
+            logger.debug("JDB wait_for_event response (prompt): %s",
+                         result[:500])
+            return result
+        logger.debug("JDB wait_for_event response (raw): %s", text[:500])
+        return text
+
     def run(self, class_name=None, args=None):
         if args and not class_name:
             raise JdbSessionError("args requires class_name to be specified")
@@ -356,19 +493,19 @@ class JdbSession:
             cmd = "run %s" % class_name
             if args:
                 cmd = "%s %s" % (cmd, args)
-        return self.send_command(cmd, timeout=TIMEOUT_EXECUTION)
+        return self._send_execution_command(cmd)
 
     def cont(self):
-        return self.send_command("cont", timeout=TIMEOUT_EXECUTION)
+        return self._send_execution_command("cont")
 
     def step(self):
-        return self.send_command("step", timeout=TIMEOUT_EXECUTION)
+        return self._send_execution_command("step")
 
     def step_up(self):
-        return self.send_command("step up", timeout=TIMEOUT_EXECUTION)
+        return self._send_execution_command("step up")
 
     def next_(self):
-        return self.send_command("next", timeout=TIMEOUT_EXECUTION)
+        return self._send_execution_command("next")
 
     def breakpoint_set(self, location, thread_id=None, suspend_policy=None):
         if ":" in location:

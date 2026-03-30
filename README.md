@@ -224,11 +224,12 @@ jdb_connect(port=5005, wait_timeout=30)
 ### Execution Control
 | Tool | Description |
 |------|-------------|
-| `jdb_run` | Start execution of the application's main class. |
-| `jdb_cont` | Continue until next breakpoint/exception/exit. |
-| `jdb_step` | Step into (enter method calls). |
-| `jdb_next` | Step over (skip method calls). |
-| `jdb_step_up` | Step out (run until current method returns). |
+| `jdb_run` | Start execution of the application's main class. Returns immediately once execution resumes. |
+| `jdb_cont` | Continue execution. Returns immediately once the JVM resumes (fire-and-forget). Returns stop event if a breakpoint/exception is hit within `TIMEOUT_RESUME`. |
+| `jdb_step` | Step into (enter method calls). Returns stop event on completion or returns immediately if execution resumes. |
+| `jdb_next` | Step over (skip method calls). Same return behavior as step. |
+| `jdb_step_up` | Step out (run until current method returns). Same return behavior as step. |
+| `jdb_wait_for_event` | Wait for a stop event after `jdb_cont`/`jdb_run` returned `reason="resumed"`. Blocks until breakpoint/exception/exit or timeout (default 120s). |
 
 ### Breakpoints
 | Tool | Description |
@@ -342,7 +343,8 @@ MCP server configuration:
 |----------|---------|-------------|
 | `JDB_MCP_TIMEOUT_CONNECT` | 60 | JDB attach and initial prompt |
 | `JDB_MCP_TIMEOUT_COMMAND` | 30 | Non-execution commands (breakpoints, inspection, etc.) |
-| `JDB_MCP_TIMEOUT_EXECUTION` | 120 | Execution commands (run, cont, step, next, step up) |
+| `JDB_MCP_TIMEOUT_EXECUTION` | 120 | Prompt-based commands (used internally by `send_command`) |
+| `JDB_MCP_TIMEOUT_RESUME` | 5 | Execution commands (run, cont, step, next, step up). These return immediately when output arrives or after this timeout if execution resumes with no output (fire-and-forget). |
 
 ## Build Tool Debug Stanzas
 
