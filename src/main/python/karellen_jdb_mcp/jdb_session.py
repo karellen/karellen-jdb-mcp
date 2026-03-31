@@ -17,7 +17,6 @@
 
 import logging
 import os
-import queue
 import re
 import socket
 import subprocess
@@ -62,9 +61,6 @@ PROMPT_RE = re.compile(r'^(?:> |.+\[\d+\] )$')
 # before deciding the command is done (in seconds)
 PROMPT_SETTLE_TIME = 0.2
 
-# Sentinel value for stream-ended (distinct from None which queue.get returns on timeout)
-_STREAM_ENDED = object()
-
 
 class JdbSessionError(Exception):
     pass
@@ -74,16 +70,99 @@ class JdbTimeoutError(JdbSessionError):
     pass
 
 
+class JdbReadStream:
+    """Read-only byte stream with pushback, backed by a background reader thread.
+
+    The reader thread appends data from subprocess stdout into an internal
+    buffer and signals availability via a threading.Event.  The public API:
+
+      read(timeout)  — wait for data, drain the entire buffer, return it.
+                       Returns b"" on timeout, None on EOF.
+      unread(data)   — push bytes back to the front of the buffer and
+                       signal availability.
+      eof            — True after the underlying stream has ended.
+
+    No write, no seek.
+    """
+
+    def __init__(self):
+        self._buf = b""
+        self._lock = threading.Lock()
+        self._data_available = threading.Event()
+        self._eof = False
+        self._reader_thread = None
+
+    def start(self, stdout):
+        """Start the background reader thread on the given stdout pipe."""
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop, args=(stdout,), daemon=True)
+        self._reader_thread.start()
+
+    def _reader_loop(self, stdout):
+        try:
+            while True:
+                data = stdout.read(4096)
+                if not data:
+                    break
+                with self._lock:
+                    self._buf += data
+                    self._data_available.set()
+        except (OSError, ValueError):
+            pass
+        finally:
+            with self._lock:
+                self._eof = True
+                self._data_available.set()
+
+    def read(self, timeout=None):
+        """Wait for data and drain the buffer.
+
+        Returns:
+            bytes — all data currently in the buffer (length > 0).
+            b""   — timeout expired, no data available.
+            None  — end of stream (EOF), no more data will arrive.
+        """
+        if not self._data_available.wait(timeout=timeout):
+            return b""
+        with self._lock:
+            data = self._buf
+            self._buf = b""
+            if self._eof:
+                # Keep event set so subsequent reads return EOF immediately
+                return data if data else None
+            if data:
+                self._data_available.clear()
+                return data
+            # Shouldn't happen, but defensive
+            self._data_available.clear()
+            return b""
+
+    def unread(self, data):
+        """Push data back to the front of the buffer."""
+        if data:
+            with self._lock:
+                self._buf = data + self._buf
+                self._data_available.set()
+
+    @property
+    def eof(self):
+        return self._eof
+
+    def reset(self):
+        """Reset the stream for a new connection."""
+        self._buf = b""
+        self._lock = threading.Lock()
+        self._data_available = threading.Event()
+        self._eof = False
+        self._reader_thread = None
+
+
 class JdbSession:
     def __init__(self):
         self._process = None
         self._connected = False
         self._version_info = None
-        self._reader_thread = None
-        self._line_queue = queue.Queue()
-        self._reader_lock = threading.Lock()
-        self._closed = False
-        self._stream_ended = False
+        self._stream = JdbReadStream()
 
     @property
     def version_info(self):
@@ -140,10 +219,8 @@ class JdbSession:
                 stderr=subprocess.STDOUT,
                 bufsize=0,
             )
-            self._closed = False
-            self._stream_ended = False
-            self._line_queue = queue.Queue()
-            self._start_reader()
+            self._stream.reset()
+            self._stream.start(self._process.stdout)
 
             try:
                 attach_timeout = min(JDB_ATTACH_TIMEOUT, max(1, deadline - time.monotonic())) \
@@ -208,32 +285,13 @@ class JdbSession:
         logger.debug("JDB response: %s", output[:500])
         return output
 
-    def _start_reader(self):
-        """Start the background thread that reads JDB stdout."""
-        self._reader_thread = threading.Thread(
-            target=self._reader_loop, daemon=True)
-        self._reader_thread.start()
-
-    def _reader_loop(self):
-        """Continuously read from JDB stdout and enqueue chunks."""
-        try:
-            while not self._closed:
-                data = self._process.stdout.read(4096)
-                if not data:
-                    break
-                self._line_queue.put(data)
-        except (OSError, ValueError):
-            pass
-        finally:
-            self._line_queue.put(_STREAM_ENDED)
-
     def _read_until_prompt(self, timeout):
         """Read output from JDB until a prompt is detected.
 
-        Accumulates data from the reader thread's queue. After each chunk,
-        checks if the buffer ends with a prompt pattern. Uses a settle time
-        to avoid false-matching on output lines that resemble prompts: after
-        a potential prompt is seen, waits PROMPT_SETTLE_TIME for more data.
+        Accumulates data from the stream. After each chunk, checks if the
+        buffer ends with a prompt pattern. Uses a settle time to avoid
+        false-matching on output lines that resemble prompts: after a
+        potential prompt is seen, waits PROMPT_SETTLE_TIME for more data.
         If more data arrives, re-evaluates. If not, accepts the prompt.
 
         Returns:
@@ -251,17 +309,14 @@ class JdbSession:
                     "Timeout waiting for JDB prompt after %ds. Output so far: %s"
                     % (timeout, text[:500]))
 
-            try:
-                chunk = self._line_queue.get(timeout=min(remaining, PROMPT_SETTLE_TIME))
-            except queue.Empty:
-                chunk = None
+            chunk = self._stream.read(timeout=min(remaining, PROMPT_SETTLE_TIME))
 
-            if chunk is _STREAM_ENDED:
-                self._stream_ended = True
+            if chunk is None:
+                # EOF
                 text = buf.decode("utf-8", errors="replace")
                 return self._strip_prompt(text) or text
 
-            if chunk is None:
+            if not chunk:
                 # Timeout — no data arrived. Check if we have a prompt candidate.
                 text = buf.decode("utf-8", errors="replace")
                 prompt_result = self._strip_prompt(text)
@@ -282,15 +337,14 @@ class JdbSession:
                 # Potential prompt found. Wait settle time for more data.
                 settle_deadline = time.monotonic() + PROMPT_SETTLE_TIME
                 while time.monotonic() < settle_deadline:
-                    try:
-                        extra = self._line_queue.get(
-                            timeout=settle_deadline - time.monotonic())
-                    except queue.Empty:
-                        break
-                    if extra is _STREAM_ENDED:
-                        self._stream_ended = True
+                    extra = self._stream.read(
+                        timeout=settle_deadline - time.monotonic())
+                    if extra is None:
+                        # EOF
                         text = buf.decode("utf-8", errors="replace")
                         return self._strip_prompt(text) or text
+                    if not extra:
+                        break
                     buf += extra
                     last_data_time = time.monotonic()
                     text = buf.decode("utf-8", errors="replace")
@@ -298,9 +352,6 @@ class JdbSession:
                     if new_result is not None:
                         prompt_result = new_result
                     else:
-                        # More data arrived that no longer ends with a prompt.
-                        # The previous match was a false positive. Break settle
-                        # loop and return to the main loop.
                         prompt_result = None
                         break
 
@@ -333,7 +384,6 @@ class JdbSession:
 
     def close(self):
         """Terminate the JDB session."""
-        self._closed = True
         if self._process is not None:
             logger.info("Closing JDB session")
             try:
@@ -361,8 +411,9 @@ class JdbSession:
         flowing (PROMPT_SETTLE_TIME of silence). If no output arrives within
         TIMEOUT_RESUME, returns empty string (execution resumed, fire-and-forget).
 
-        This avoids the prompt detection issue where JDB's response format
-        (e.g. "> Nothing suspended.") doesn't end with a recognizable prompt.
+        Any unconsumed data in the buffer at timeout is pushed back into the
+        stream so that a subsequent wait_for_event() or send_command() picks
+        it up without data loss.
         """
         if not self._connected or self._process is None:
             raise JdbSessionError("Not connected to JDB")
@@ -382,24 +433,27 @@ class JdbSession:
         buf = b""
         deadline = time.monotonic() + TIMEOUT_RESUME
         last_data_time = time.monotonic()
+        timed_out = False
 
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                timed_out = True
                 break
 
-            try:
-                chunk = self._line_queue.get(
-                    timeout=min(remaining, PROMPT_SETTLE_TIME))
-            except queue.Empty:
+            chunk = self._stream.read(
+                timeout=min(remaining, PROMPT_SETTLE_TIME))
+
+            if chunk is None:
+                # EOF
+                break
+
+            if not chunk:
+                # Timeout — no data arrived
                 if buf and (time.monotonic() - last_data_time
                             >= PROMPT_SETTLE_TIME):
                     break
                 continue
-
-            if chunk is _STREAM_ENDED:
-                self._stream_ended = True
-                break
 
             buf += chunk
             last_data_time = time.monotonic()
@@ -413,11 +467,16 @@ class JdbSession:
                 return prompt_result
 
         text = buf.decode("utf-8", errors="replace")
-        # Strip prompt if present, otherwise return raw output
         result = self._strip_prompt(text)
         if result is not None:
             logger.debug("JDB execution response (prompt): %s", result[:500])
             return result
+        # Deadline expired with partial data — push back for wait_for_event
+        if timed_out and buf:
+            self._stream.unread(buf)
+            logger.debug("JDB execution: pushed back %d bytes", len(buf))
+            return ""
+        # Data arrived and settled (no prompt) — return as-is
         logger.debug("JDB execution response (raw): %s", text[:500])
         return text
 
@@ -426,7 +485,8 @@ class JdbSession:
 
         Blocks until JDB produces output (breakpoint hit, exception, program
         exit) or the timeout expires. Does not send any command — it only
-        reads from the output queue.
+        reads from the stream (including any data pushed back by a prior
+        execution command).
 
         Args:
             timeout: Maximum seconds to wait for an event.
@@ -451,19 +511,20 @@ class JdbSession:
             if remaining <= 0:
                 break
 
-            try:
-                chunk = self._line_queue.get(
-                    timeout=min(remaining, PROMPT_SETTLE_TIME))
-            except queue.Empty:
+            chunk = self._stream.read(
+                timeout=min(remaining, PROMPT_SETTLE_TIME))
+
+            if chunk is None:
+                # EOF
+                break
+
+            if not chunk:
+                # Timeout
                 if buf and last_data_time is not None and (
                         time.monotonic() - last_data_time
                         >= PROMPT_SETTLE_TIME):
                     break
                 continue
-
-            if chunk is _STREAM_ENDED:
-                self._stream_ended = True
-                break
 
             buf += chunk
             last_data_time = time.monotonic()
