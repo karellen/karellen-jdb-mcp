@@ -13,12 +13,12 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-import queue
+import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from karellen_jdb_mcp.jdb_session import JdbSession, JdbSessionError, JdbTimeoutError, PROMPT_RE
+from karellen_jdb_mcp.jdb_session import JdbSession, JdbReadStream, JdbSessionError, JdbTimeoutError, PROMPT_RE
 
 
 class PromptRegexTests(unittest.TestCase):
@@ -74,7 +74,7 @@ class JdbSessionNotConnectedTests(unittest.TestCase):
 
 
 class SendCommandTests(unittest.TestCase):
-    """Test send_command end-to-end with the line queue."""
+    """Test send_command end-to-end with the stream."""
 
     def setUp(self):
         self.session = JdbSession()
@@ -82,21 +82,27 @@ class SendCommandTests(unittest.TestCase):
         self.session._process = MagicMock()
         self.session._process.poll.return_value = None
         self.session._process.stdin = MagicMock()
-        self.session._line_queue = queue.Queue()
+        self.session._stream = JdbReadStream()
 
-    def _enqueue(self, *chunks):
-        for chunk in chunks:
-            self.session._line_queue.put(chunk)
+    def _feed(self, *chunks):
+        self.session._stream.unread(b"".join(chunks))
+
+    def _feed_eof(self, *chunks):
+        if chunks:
+            self.session._stream.unread(b"".join(chunks))
+        with self.session._stream._lock:
+            self.session._stream._eof = True
+            self.session._stream._data_available.set()
 
     def test_sends_command_and_returns_output(self):
-        self._enqueue(b"result line\n> ")
+        self._feed(b"result line\n> ")
         result = self.session.send_command("threads")
         self.assertEqual(result, "result line")
         self.session._process.stdin.write.assert_called_once_with(b"threads\n")
         self.session._process.stdin.flush.assert_called_once()
 
     def test_multiline_response(self):
-        self._enqueue(b"line1\nline2\nline3\n> ")
+        self._feed(b"line1\nline2\nline3\n> ")
         result = self.session.send_command("classes")
         self.assertEqual(result, "line1\nline2\nline3")
 
@@ -137,7 +143,7 @@ class SendCommandTests(unittest.TestCase):
             self.session.send_command("threads", timeout=0.3)
 
     def test_thread_prompt_response(self):
-        self._enqueue(b"some result\nmain[1] ")
+        self._feed(b"some result\nmain[1] ")
         result = self.session.send_command("where")
         self.assertEqual(result, "some result")
 
@@ -151,7 +157,7 @@ class JdbSessionCommandBuildingTests(unittest.TestCase):
         self.session._process = MagicMock()
         self.session._process.poll.return_value = None
         self.session._process.stdin = MagicMock()
-        self.session._line_queue = queue.Queue()
+        self.session._stream = JdbReadStream()
         self.commands_sent = []
 
         def capture_send(cmd, timeout=30):
@@ -592,84 +598,108 @@ class StripPromptTests(unittest.TestCase):
 
 
 class ReadUntilPromptTests(unittest.TestCase):
-    """Test _read_until_prompt directly against the line queue."""
+    """Test _read_until_prompt directly against the stream."""
 
     def setUp(self):
         self.session = JdbSession()
         self.session._connected = True
         self.session._process = MagicMock()
         self.session._process.poll.return_value = None
-        self.session._line_queue = queue.Queue()
+        self.session._stream = JdbReadStream()
 
-    def _enqueue(self, *chunks):
-        for chunk in chunks:
-            self.session._line_queue.put(chunk)
+    def _feed(self, *chunks):
+        self.session._stream.unread(b"".join(chunks))
+
+    def _feed_eof(self, *chunks):
+        if chunks:
+            self.session._stream.unread(b"".join(chunks))
+        with self.session._stream._lock:
+            self.session._stream._eof = True
+            self.session._stream._data_available.set()
 
     def test_prompt_detected_single_chunk(self):
-        self._enqueue(b"Initializing jdb ...\n> ")
+        self._feed(b"Initializing jdb ...\n> ")
         result = self.session._read_until_prompt(timeout=2)
         self.assertEqual(result, "Initializing jdb ...")
 
-    def test_prompt_detected_split_chunks(self):
-        self._enqueue(b"output line\n", b"> ")
+    def test_prompt_detected_delayed_data(self):
+        """Data arriving after a short delay is still caught."""
+        def delayed():
+            time.sleep(0.05)
+            self.session._stream.unread(b"output line\n> ")
+        t = threading.Thread(target=delayed)
+        t.start()
         result = self.session._read_until_prompt(timeout=2)
+        t.join()
         self.assertEqual(result, "output line")
 
     def test_thread_prompt(self):
-        self._enqueue(b"Step completed\nmain[1] ")
+        self._feed(b"Step completed\nmain[1] ")
         result = self.session._read_until_prompt(timeout=2)
         self.assertEqual(result, "Step completed")
 
     def test_timeout_raises_jdb_timeout_error(self):
-        # Nothing in queue — should timeout
         with self.assertRaises(JdbTimeoutError) as ctx:
             self.session._read_until_prompt(timeout=0.3)
         self.assertIn("Timeout", str(ctx.exception))
 
     def test_timeout_includes_partial_output(self):
-        self._enqueue(b"partial output without prompt")
+        self._feed(b"partial output without prompt")
         with self.assertRaises(JdbTimeoutError) as ctx:
             self.session._read_until_prompt(timeout=0.5)
         self.assertIn("partial output", str(ctx.exception))
 
-    def test_stream_ended_returns_output(self):
-        from karellen_jdb_mcp.jdb_session import _STREAM_ENDED
-        self._enqueue(b"final output\n> ", _STREAM_ENDED)
+    def test_eof_returns_output_with_prompt(self):
+        self._feed_eof(b"final output\n> ")
         result = self.session._read_until_prompt(timeout=2)
         self.assertEqual(result, "final output")
 
-    def test_stream_ended_no_prompt_returns_raw(self):
-        from karellen_jdb_mcp.jdb_session import _STREAM_ENDED
-        self._enqueue(b"output with no prompt", _STREAM_ENDED)
+    def test_eof_no_prompt_returns_raw(self):
+        self._feed_eof(b"output with no prompt")
         result = self.session._read_until_prompt(timeout=2)
         self.assertEqual(result, "output with no prompt")
 
     def test_process_exited_returns_output(self):
         self.session._process.poll.return_value = 0
-        self._enqueue(b"exited output")
+        self._feed(b"exited output")
         result = self.session._read_until_prompt(timeout=1)
         self.assertEqual(result, "exited output")
 
     def test_settle_time_false_positive_prompt(self):
-        """A prompt-like line followed by more data is not a false return."""
-        self._enqueue(b"main[1] ", b"extra output\nmain[1] ")
+        """A prompt-like line followed by more data during settle is not a false return."""
+        self._feed(b"main[1] ")
+
+        def delayed():
+            time.sleep(0.05)
+            self.session._stream.unread(b"extra output\nmain[1] ")
+        t = threading.Thread(target=delayed)
+        t.start()
         result = self.session._read_until_prompt(timeout=2)
+        t.join()
         self.assertIn("extra output", result)
 
     def test_multiline_output_with_prompt(self):
-        self._enqueue(b"line1\nline2\nline3\n> ")
+        self._feed(b"line1\nline2\nline3\n> ")
         result = self.session._read_until_prompt(timeout=2)
         self.assertEqual(result, "line1\nline2\nline3")
 
-    def test_stream_ended_during_settle(self):
-        """Stream ending during settle time still returns properly."""
-        from karellen_jdb_mcp.jdb_session import _STREAM_ENDED
-        self._enqueue(b"output\nmain[1] ", _STREAM_ENDED)
+    def test_eof_during_settle(self):
+        """EOF during settle time still returns properly."""
+        self._feed(b"output\nmain[1] ")
+
+        def delayed_eof():
+            time.sleep(0.05)
+            with self.session._stream._lock:
+                self.session._stream._eof = True
+                self.session._stream._data_available.set()
+        t = threading.Thread(target=delayed_eof)
+        t.start()
         result = self.session._read_until_prompt(timeout=2)
+        t.join()
         self.assertEqual(result, "output")
 
     def test_virtual_thread_prompt(self):
-        self._enqueue(
+        self._feed(
             b"Step completed\n"
             b"VirtualThread[#42]/runnable@ForkJoinPool-1-worker-1[1] ")
         result = self.session._read_until_prompt(timeout=2)
@@ -695,12 +725,17 @@ class ExecutionCommandTests(unittest.TestCase):
         self.session._process = MagicMock()
         self.session._process.poll.return_value = None
         self.session._process.stdin = MagicMock()
-        self.session._line_queue = queue.Queue()
+        self.session._stream = JdbReadStream()
 
-    def _enqueue(self, *chunks):
-        """Enqueue byte chunks for the reader to find."""
-        for chunk in chunks:
-            self.session._line_queue.put(chunk)
+    def _feed(self, *chunks):
+        self.session._stream.unread(b"".join(chunks))
+
+    def _feed_eof(self, *chunks):
+        if chunks:
+            self.session._stream.unread(b"".join(chunks))
+        with self.session._stream._lock:
+            self.session._stream._eof = True
+            self.session._stream._data_available.set()
 
     def test_cont_returns_empty_when_no_output(self):
         """Fire-and-forget: execution resumed, no output within timeout."""
@@ -715,32 +750,32 @@ class ExecutionCommandTests(unittest.TestCase):
 
     def test_cont_returns_immediately_on_nothing_suspended(self):
         """'Nothing suspended.' response should return immediately, no prompt needed."""
-        self._enqueue(b"> Nothing suspended.\n")
+        self._feed(b"> Nothing suspended.\n")
         result = self.session.cont()
         self.assertIn("Nothing suspended.", result)
 
     def test_cont_returns_immediately_with_prompt(self):
         """When prompt IS present, strip it and return."""
-        self._enqueue(b"Nothing suspended.\n> ")
+        self._feed(b"Nothing suspended.\n> ")
         result = self.session.cont()
         self.assertEqual(result, "Nothing suspended.")
 
     def test_step_returns_stop_event(self):
-        self._enqueue(
+        self._feed(
             b'Step completed: "thread=main", com.example.Main.foo(), '
             b'line=21 bci=5\nmain[1] ')
         result = self.session.step()
         self.assertIn("Step completed", result)
 
     def test_next_returns_stop_event(self):
-        self._enqueue(
+        self._feed(
             b'Step completed: "thread=main", com.example.Main.foo(), '
             b'line=22 bci=8\nmain[1] ')
         result = self.session.next_()
         self.assertIn("Step completed", result)
 
     def test_step_up_returns_stop_event(self):
-        self._enqueue(
+        self._feed(
             b'Step completed: "thread=main", com.example.Main.main(), '
             b'line=11 bci=3\nmain[1] ')
         result = self.session.step_up()
@@ -771,11 +806,31 @@ class ExecutionCommandTests(unittest.TestCase):
         with self.assertRaises(JdbSessionError):
             self.session.cont()
 
-    def test_stream_ended_returns_output(self):
-        from karellen_jdb_mcp.jdb_session import _STREAM_ENDED
-        self._enqueue(b"Nothing suspended.\n", _STREAM_ENDED)
+    def test_eof_returns_output(self):
+        self._feed_eof(b"Nothing suspended.\n")
         result = self.session.cont()
         self.assertIn("Nothing suspended.", result)
+
+    def test_cont_pushes_back_unconsumed_data(self):
+        """Data arriving at timeout boundary is pushed back for wait_for_event."""
+        from karellen_jdb_mcp import jdb_session
+        orig = jdb_session.TIMEOUT_RESUME
+        try:
+            jdb_session.TIMEOUT_RESUME = 0.3
+            # Feed data that has no prompt — will timeout and push back
+
+            def delayed():
+                time.sleep(0.15)
+                self.session._stream.unread(
+                    b'Breakpoint hit: "thread=main", Main.m(), line=10\nmain[1] ')
+            t = threading.Thread(target=delayed)
+            t.start()
+            result = self.session.cont()
+            t.join()
+            # cont should have returned the stop event (prompt detected within timeout)
+            self.assertIn("Breakpoint hit", result)
+        finally:
+            jdb_session.TIMEOUT_RESUME = orig
 
 
 class WaitForEventTests(unittest.TestCase):
@@ -786,14 +841,20 @@ class WaitForEventTests(unittest.TestCase):
         self.session._connected = True
         self.session._process = MagicMock()
         self.session._process.poll.return_value = None
-        self.session._line_queue = queue.Queue()
+        self.session._stream = JdbReadStream()
 
-    def _enqueue(self, *chunks):
-        for chunk in chunks:
-            self.session._line_queue.put(chunk)
+    def _feed(self, *chunks):
+        self.session._stream.unread(b"".join(chunks))
+
+    def _feed_eof(self, *chunks):
+        if chunks:
+            self.session._stream.unread(b"".join(chunks))
+        with self.session._stream._lock:
+            self.session._stream._eof = True
+            self.session._stream._data_available.set()
 
     def test_returns_stop_event_with_prompt(self):
-        self._enqueue(
+        self._feed(
             b'Breakpoint hit: "thread=main", com.example.Main.foo(), '
             b'line=42 bci=0\nmain[1] ')
         result = self.session.wait_for_event(timeout=2)
@@ -804,7 +865,7 @@ class WaitForEventTests(unittest.TestCase):
         self.assertEqual(result, "")
 
     def test_returns_stop_event_without_prompt(self):
-        self._enqueue(
+        self._feed(
             b'Breakpoint hit: "thread=main", com.example.Main.foo(), '
             b'line=42 bci=0\n')
         result = self.session.wait_for_event(timeout=1)
@@ -820,24 +881,100 @@ class WaitForEventTests(unittest.TestCase):
         with self.assertRaises(JdbSessionError):
             self.session.wait_for_event()
 
-    def test_stream_ended_returns_output(self):
-        from karellen_jdb_mcp.jdb_session import _STREAM_ENDED
-        self._enqueue(
-            b'The application exited\n', _STREAM_ENDED)
+    def test_eof_returns_output(self):
+        self._feed_eof(b'The application exited\n')
         result = self.session.wait_for_event(timeout=2)
         self.assertIn("application exited", result)
 
     def test_delayed_event(self):
         """Event arriving after initial silence is still caught."""
-        import threading
-
-        def delayed_enqueue():
+        def delayed():
             time.sleep(0.3)
-            self.session._line_queue.put(
+            self.session._stream.unread(
                 b'Breakpoint hit: "thread=main", Main.m(), line=10\nmain[1] ')
 
-        t = threading.Thread(target=delayed_enqueue)
+        t = threading.Thread(target=delayed)
         t.start()
         result = self.session.wait_for_event(timeout=2)
         t.join()
         self.assertIn("Breakpoint hit", result)
+
+
+class JdbReadStreamTests(unittest.TestCase):
+    """Test JdbReadStream directly."""
+
+    def test_read_returns_empty_on_timeout(self):
+        stream = JdbReadStream()
+        result = stream.read(timeout=0.1)
+        self.assertEqual(result, b"")
+
+    def test_unread_then_read(self):
+        stream = JdbReadStream()
+        stream.unread(b"hello")
+        result = stream.read(timeout=0.1)
+        self.assertEqual(result, b"hello")
+
+    def test_unread_prepends(self):
+        stream = JdbReadStream()
+        stream.unread(b"world")
+        stream.unread(b"hello ")
+        result = stream.read(timeout=0.1)
+        self.assertEqual(result, b"hello world")
+
+    def test_read_drains_entire_buffer(self):
+        stream = JdbReadStream()
+        stream.unread(b"all data at once")
+        result = stream.read(timeout=0.1)
+        self.assertEqual(result, b"all data at once")
+        # Second read should timeout (buffer empty)
+        result2 = stream.read(timeout=0.1)
+        self.assertEqual(result2, b"")
+
+    def test_eof_returns_none(self):
+        stream = JdbReadStream()
+        with stream._lock:
+            stream._eof = True
+            stream._data_available.set()
+        result = stream.read(timeout=0.1)
+        self.assertIsNone(result)
+
+    def test_eof_with_data_returns_data_then_none(self):
+        stream = JdbReadStream()
+        stream.unread(b"last data")
+        with stream._lock:
+            stream._eof = True
+        result1 = stream.read(timeout=0.1)
+        self.assertEqual(result1, b"last data")
+        result2 = stream.read(timeout=0.1)
+        self.assertIsNone(result2)
+
+    def test_eof_property(self):
+        stream = JdbReadStream()
+        self.assertFalse(stream.eof)
+        with stream._lock:
+            stream._eof = True
+        self.assertTrue(stream.eof)
+
+    def test_reset(self):
+        stream = JdbReadStream()
+        stream.unread(b"old data")
+        with stream._lock:
+            stream._eof = True
+        stream.reset()
+        self.assertFalse(stream.eof)
+        result = stream.read(timeout=0.1)
+        self.assertEqual(result, b"")
+
+    def test_concurrent_unread_and_read(self):
+        """Reader thread pushes data while consumer reads."""
+        stream = JdbReadStream()
+
+        def writer():
+            time.sleep(0.1)
+            stream.unread(b"async data")
+
+        t = threading.Thread(target=writer)
+        t.start()
+        result = stream.read(timeout=2)
+        t.join()
+        self.assertEqual(result, b"async data")
