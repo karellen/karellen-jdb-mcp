@@ -16,7 +16,7 @@
 import unittest
 from unittest.mock import patch, MagicMock
 
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from karellen_jdb_mcp.jdb_session import JdbSessionError
 from karellen_jdb_mcp.process_manager import ProcessManagerError

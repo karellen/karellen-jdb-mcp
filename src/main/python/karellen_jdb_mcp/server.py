@@ -13,17 +13,19 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-"""FastMCP server with tool definitions for JDB (Java Debugger)."""
+"""MCP server with tool definitions for JDB (Java Debugger)."""
 
 import atexit
 import functools
 import logging
 import os
 import signal
+import threading
 import traceback
+from importlib.metadata import PackageNotFoundError, version
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from karellen_jdb_mcp.jdb_session import JdbSession, JdbSessionError
 from karellen_jdb_mcp.process_manager import ProcessManager, ProcessManagerError
@@ -38,17 +40,26 @@ from karellen_jdb_mcp.types import (
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("karellen-jdb-mcp", instructions=(
+try:
+    _version = version("karellen-jdb-mcp")
+except PackageNotFoundError:
+    _version = ""
+
+mcp = MCPServer("karellen-jdb-mcp", instructions=(
     "JDB (Java Debugger) MCP server. Use jdb_connect to attach to a "
     "running JVM (started with -agentlib:jdwp=transport=dt_socket,server=y,"
     "suspend=y,address=*:<port>), then use execution control and inspection "
     "tools to debug. Supports breakpoints, watchpoints, exception breakpoints, "
     "thread inspection, expression evaluation, and class introspection."
-))
+), version=_version)
 
 # Module-level state: sessions keyed by port, process manager
 _jdb_sessions = {}
 _process_manager = ProcessManager()
+
+# The SDK runs sync tools on worker threads, but the state above is not
+# thread-safe, so every tool call is serialized through this lock.
+_session_lock = threading.RLock()
 
 
 def _cleanup():
@@ -111,7 +122,8 @@ def _tag_errors(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
-            return fn(*args, **kwargs)
+            with _session_lock:
+                return fn(*args, **kwargs)
         except JdbSessionError as e:
             raise ToolError("jdb: %s" % e) from e
         except ProcessManagerError as e:
