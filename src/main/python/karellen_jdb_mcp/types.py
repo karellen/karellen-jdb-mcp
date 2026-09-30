@@ -162,6 +162,14 @@ class StringResult:
 
 
 @dataclass
+class RedefineResult:
+    class_id: str
+    class_file: str
+    rearmed_breakpoints: List[str] = field(default_factory=list)
+    rearm_failures: List[str] = field(default_factory=list)
+
+
+@dataclass
 class LaunchResult:
     port: int
     pid: int

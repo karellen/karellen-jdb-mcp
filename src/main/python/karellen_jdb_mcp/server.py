@@ -35,7 +35,7 @@ from karellen_jdb_mcp.types import (
     StackFrame, ThreadGroupInfo, Variable,
     ClassInfo, MethodInfo, FieldInfo, LockInfo, ThreadLockInfo,
     MonitorInfo, EvalResult, StopEvent, ConnectStatus,
-    StringResult, VersionInfo, SessionInfo, LaunchResult, ProcessStatus,
+    StringResult, RedefineResult, VersionInfo, SessionInfo, LaunchResult, ProcessStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,8 @@ mcp = MCPServer("karellen-jdb-mcp", instructions=(
     "running JVM (started with -agentlib:jdwp=transport=dt_socket,server=y,"
     "suspend=y,address=*:<port>), then use execution control and inspection "
     "tools to debug. Supports breakpoints, watchpoints, exception breakpoints, "
-    "thread inspection, expression evaluation, and class introspection."
+    "thread inspection, expression evaluation, class introspection, and "
+    "HotSwap class redefinition."
 ), version=_version)
 
 # Module-level state: sessions keyed by port, process manager
@@ -891,6 +892,58 @@ def jdb_reenter(port: int = None) -> StringResult:
     output = session.reenter()
     _check_error(output)
     return StringResult(result=output.strip() if output else "Method re-entered.")
+
+
+# --- HotSwap Tools ---
+
+@mcp.tool()
+@_tag_errors
+def jdb_redefine(class_id: str, class_file: str, port: int = None) -> RedefineResult:
+    """Replace a loaded class's bytecode with a recompiled .class file (HotSwap),
+    applying a fix to the running JVM without restarting it.
+
+    The JVM only accepts changes to method bodies: adding or removing methods
+    or fields, changing signatures, or changing the class hierarchy is rejected.
+    New invocations run the new code; methods already on a thread's stack keep
+    running the old code until they return (use jdb_reenter to restart the
+    current method with the new code).
+
+    The JVM deletes all breakpoints in a redefined class. This tool sets them
+    again afterwards with their original modifiers; line breakpoints then refer
+    to the line numbers of the new code.
+
+    Args:
+        class_id: Fully qualified name of a loaded class (e.g. "com.example.MyService").
+            Nested classes are separate classes (e.g. "com.example.Outer$Inner").
+        class_file: Path to the recompiled .class file, read by jdb on the machine
+            running this server. Relative paths are resolved against the server's
+            working directory. Must not contain whitespace.
+    """
+    session = _require_session(port)
+    class_file = os.path.abspath(class_file)
+    if any(c.isspace() for c in class_file):
+        raise JdbSessionError("Class file path must not contain whitespace "
+                              "(jdb splits command arguments on whitespace): %s" % class_file)
+    if not os.path.isfile(class_file):
+        raise JdbSessionError("Class file not found: %s" % class_file)
+
+    breakpoints = [bp.location for bp in parser.parse_breakpoint_list(session.breakpoint_list())
+                   if bp.class_name == class_id]
+
+    output = session.redefine(class_id, class_file)
+    _check_error(output)
+    error = parser.parse_redefine_error(output)
+    if error:
+        raise JdbSessionError(error)
+
+    result = RedefineResult(class_id=class_id, class_file=class_file)
+    for location in breakpoints:
+        output = session.breakpoint_rearm(location)
+        if parser.is_breakpoint_set(output):
+            result.rearmed_breakpoints.append(location)
+        else:
+            result.rearm_failures.append("%s: %s" % (location, output.strip()))
+    return result
 
 
 # --- Tracing Tools ---

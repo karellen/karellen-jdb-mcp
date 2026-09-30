@@ -286,7 +286,7 @@ def parse_breakpoint_set(output):
         if ":" in location:
             class_name = location.split(":")[0]
         elif "." in location:
-            parts = location.rsplit(".", 1)
+            parts = location.split("(", 1)[0].rsplit(".", 1)
             if parts[1][0].islower() or parts[1].startswith("<"):
                 class_name = parts[0]
                 method = parts[1].split("(")[0]
@@ -305,6 +305,15 @@ def parse_breakpoint_set(output):
     if is_error(output):
         return None
     return BreakpointInfo(location=output.strip(), type="breakpoint")
+
+
+def is_breakpoint_set(output):
+    """Check if output confirms a breakpoint was set (or deferred).
+
+    Unlike parse_breakpoint_set, this does not treat unrecognized output as
+    success, e.g. "Unable to set breakpoint ..." is not a confirmation.
+    """
+    return BREAKPOINT_SET_RE.search(output) is not None
 
 
 # "Breakpoints set:"
@@ -331,7 +340,7 @@ def parse_breakpoint_list(output):
         if ":" in location:
             class_name = location.split(":")[0]
         elif "." in location:
-            parts = location.rsplit(".", 1)
+            parts = location.split("(", 1)[0].rsplit(".", 1)
             if parts[1][0].islower() or parts[1].startswith("<"):
                 class_name = parts[0]
                 method = parts[1].split("(")[0]
@@ -594,3 +603,28 @@ def parse_classes(output):
             continue
         classes.append(stripped)
     return classes
+
+
+# --- Redefine Parsing ---
+
+# jdb prints nothing when 'redefine' succeeds. Failures are reported without
+# the '** ' prefix that is_error() recognizes:
+# "No class named 'com.example.Foo'"
+# "More than one class named: 'com.example.Foo'"
+# "Specify classes to redefine"
+# "Specify file name for class com.example.Foo"
+# "Error reading '/path/Foo.class' - java.io.FileNotFoundException: ..."
+# "Error redefining com.example.Foo to /path/Foo.class - java.lang.UnsupportedOperationException: ..."
+REDEFINE_ERROR_RE = re.compile(
+    r'^(?:No class named|More than one class named|Specify classes to redefine|'
+    r'Specify file name for class|Error reading|Error redefining)\b.*$',
+    re.MULTILINE,
+)
+
+
+def parse_redefine_error(output):
+    """Return the error message from 'redefine' output, or None on success."""
+    m = REDEFINE_ERROR_RE.search(output)
+    if m:
+        return m.group(0).strip()
+    return None
