@@ -236,10 +236,33 @@ class ParseBreakpointSetTests(unittest.TestCase):
         self.assertEqual(bp.method, "myMethod")
         self.assertIsNone(bp.line)
 
+    def test_method_breakpoint_with_qualified_arg_types(self):
+        output = 'Set breakpoint com.example.Calc.add(int, java.lang.String)\n'
+        bp = parser.parse_breakpoint_set(output)
+        self.assertIsNotNone(bp)
+        self.assertEqual(bp.location, "com.example.Calc.add(int, java.lang.String)")
+        self.assertEqual(bp.class_name, "com.example.Calc")
+        self.assertEqual(bp.method, "add")
+
     def test_error_returns_none(self):
         output = '** Invalid location\n'
         bp = parser.parse_breakpoint_set(output)
         self.assertIsNone(bp)
+
+
+class IsBreakpointSetTests(unittest.TestCase):
+    def test_set_and_deferred_are_confirmations(self):
+        self.assertTrue(parser.is_breakpoint_set('Set breakpoint Calc:3'))
+        self.assertTrue(parser.is_breakpoint_set(
+            'Deferring breakpoint Calc.compute(int).\nIt will be set after the class is loaded.'))
+
+    def test_set_followed_by_hit_is_confirmation(self):
+        output = 'Set breakpoint Calc:3\n> \nBreakpoint hit: "thread=main", Calc.compute(), line=3 bci=0\n'
+        self.assertTrue(parser.is_breakpoint_set(output))
+
+    def test_unrecognized_output_is_not_confirmation(self):
+        self.assertFalse(parser.is_breakpoint_set('Unable to set breakpoint Calc:99 : No code at line 99 in Calc'))
+        self.assertFalse(parser.is_breakpoint_set(''))
 
 
 class ParseBreakpointListTests(unittest.TestCase):
@@ -252,6 +275,16 @@ class ParseBreakpointListTests(unittest.TestCase):
         self.assertEqual(bps[0].location, "com.example.Main:42")
         self.assertEqual(bps[0].line, 42)
         self.assertEqual(bps[1].location, "com.example.Main.method")
+
+    def test_method_breakpoints_with_arg_types(self):
+        output = ('Breakpoints set:\n'
+                  '\tbreakpoint com.example.Calc.add(int, java.lang.String)\n'
+                  '\tbreakpoint com.example.Calc.compute(int)\n'
+                  '\tbreakpoint com.example.Calc.<init>(java.util.List)\n')
+        bps = parser.parse_breakpoint_list(output)
+        self.assertEqual(len(bps), 3)
+        self.assertEqual([bp.class_name for bp in bps], ["com.example.Calc"] * 3)
+        self.assertEqual([bp.method for bp in bps], ["add", "compute", "<init>"])
 
     def test_no_breakpoints(self):
         output = 'No breakpoints set.\n'
@@ -465,3 +498,35 @@ class ParseClassesTests(unittest.TestCase):
         classes = parser.parse_classes(output)
         self.assertEqual(len(classes), 1)
         self.assertEqual(classes[0], "com.example.Main")
+
+
+class ParseRedefineErrorTests(unittest.TestCase):
+    def test_success_is_empty_output(self):
+        self.assertIsNone(parser.parse_redefine_error(""))
+
+    def test_jdb_errors(self):
+        # Verbatim jdb 25 output for each failure path of 'redefine'
+        outputs = [
+            "No class named 'NoSuch'",
+            "More than one class named: 'com.example.Calc'",
+            "Specify classes to redefine",
+            "Specify file name for class Calc",
+            "Error reading '/tmp/missing.class' - java.io.FileNotFoundException: "
+            "/tmp/missing.class (No such file or directory)",
+            "Error redefining Calc to /tmp/v3/Calc.class - "
+            "java.lang.UnsupportedOperationException: add method not implemented",
+            "Error redefining Calc to /tmp/v1/Main.class - "
+            "java.lang.NoClassDefFoundError: class names do not match",
+        ]
+        for output in outputs:
+            self.assertEqual(parser.parse_redefine_error(output), output)
+
+    def test_error_after_unrelated_event_output(self):
+        output = ('Breakpoint hit: "thread=main", Calc.add(), line=6 bci=0\n'
+                  "No class named 'NoSuch'\n")
+        self.assertEqual(parser.parse_redefine_error(output), "No class named 'NoSuch'")
+
+    def test_unrelated_event_output_is_not_error(self):
+        output = ('Breakpoint hit: "thread=main", Calc.add(), line=6 bci=0\n'
+                  'Breakpoint hit: "thread=main", Calc.add(), line=6 bci=0\n')
+        self.assertIsNone(parser.parse_redefine_error(output))

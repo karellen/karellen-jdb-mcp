@@ -188,13 +188,27 @@ For deadlock analysis:
 - `jdb_lock("objectRef")` — see who owns a lock and who's waiting
 - `jdb_thread("threadId")` then `jdb_where()` — inspect each thread's stack
 
-### 8. Managing Sessions and Processes
+### 8. Apply a Fix Without Restarting (HotSwap)
+
+After fixing a method body, recompile the class and load it into the running JVM:
+```
+jdb_redefine("com.example.MyClass", "target/classes/com/example/MyClass.class")
+jdb_reenter()   # optional: restart the current method so it runs the new code
+```
+
+- Only method body changes are accepted. Adding/removing methods or fields, or changing
+  signatures or the class hierarchy, is rejected; restart the JVM for those.
+- Methods already on a stack keep running the old code until they return.
+- Breakpoints in the class are set again automatically; check `rearm_failures` in the
+  result for any that no longer map to code.
+
+### 9. Managing Sessions and Processes
 
 - `jdb_session_list()` — list all active debug sessions with port and JDK version
 - `jdb_launch_list()` — list all launched JVM processes with status
 - `jdb_launch_status(port=<port>)` — check if a specific launched process is still running
 
-### 9. Clean Up
+### 10. Clean Up
 
 ```
 jdb_disconnect()

@@ -15,8 +15,9 @@
 `karellen-jdb-mcp` is an [MCP](https://modelcontextprotocol.io/) (Model Context Protocol)
 server that enables any MCP-compliant LLM client to use [JDB](https://docs.oracle.com/en/java/javase/21/docs/specs/man/jdb.html)
 (the Java Debugger) for debugging JVM processes. The LLM can attach to a running JVM,
-set breakpoints, step through code, evaluate expressions, inspect threads, and analyze
-concurrency issues, all through structured JSON tool calls over the JDWP protocol.
+set breakpoints, step through code, evaluate expressions, inspect threads, analyze
+concurrency issues, and hot-swap recompiled classes, all through structured JSON tool
+calls over the JDWP protocol.
 
 ## Requirements
 
@@ -296,6 +297,11 @@ jdb_connect(port=5005, wait_timeout=30)
 |------|-------------|
 | `jdb_pop` | Pop current frame (return to caller, allows re-execution). |
 | `jdb_reenter` | Re-enter current method from the beginning. |
+
+### HotSwap
+| Tool | Description |
+|------|-------------|
+| `jdb_redefine` | Replace a loaded class with a recompiled `.class` file without restarting the JVM (method body changes only). Breakpoints in the class, which the JVM deletes on redefinition, are set again with their original modifiers. |
 
 ### Tracing
 | Tool | Description |

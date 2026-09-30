@@ -226,6 +226,45 @@ class JdbSessionCommandBuildingTests(unittest.TestCase):
         self.session.breakpoint_list()
         self.assertEqual(self.commands_sent, ["clear"])
 
+    def test_breakpoint_rearm_replays_original_modifiers(self):
+        self.session.breakpoint_set("com.example.Calc.add(int, java.lang.String)", suspend_policy="go")
+        self.session.breakpoint_set("com.example.Calc:3", thread_id="0x1a8")
+        self.commands_sent.clear()
+        self.session.breakpoint_rearm("com.example.Calc:3")
+        # jdb lists the location as typed, but whitespace differences must still match
+        self.session.breakpoint_rearm("com.example.Calc.add(int,java.lang.String)")
+        self.assertEqual(self.commands_sent, [
+            "clear com.example.Calc:3",
+            "stop 0x1a8 at com.example.Calc:3",
+            "clear com.example.Calc.add(int,java.lang.String)",
+            "stop go in com.example.Calc.add(int, java.lang.String)",
+        ])
+
+    def test_breakpoint_rearm_unrecorded_uses_plain_stop(self):
+        self.session.breakpoint_rearm("com.example.Calc:3")
+        self.session.breakpoint_rearm("com.example.Calc.compute")
+        self.assertEqual(self.commands_sent, [
+            "clear com.example.Calc:3",
+            "stop at com.example.Calc:3",
+            "clear com.example.Calc.compute",
+            "stop in com.example.Calc.compute",
+        ])
+
+    def test_breakpoint_clear_forgets_modifiers(self):
+        self.session.breakpoint_set("com.example.Calc:3", suspend_policy="go")
+        self.session.breakpoint_set("com.example.Calc:5", suspend_policy="thread")
+        self.session.breakpoint_clear("com.example.Calc:3")
+        self.session.breakpoint_set("com.example.Calc:3")
+        self.commands_sent.clear()
+        self.session.breakpoint_rearm("com.example.Calc:3")
+        self.session.breakpoint_rearm("com.example.Calc:5")
+        self.assertEqual(self.commands_sent, [
+            "clear com.example.Calc:3",
+            "stop at com.example.Calc:3",
+            "clear com.example.Calc:5",
+            "stop thread at com.example.Calc:5",
+        ])
+
     def test_catch_all(self):
         self.session.catch("java.lang.Exception")
         self.assertEqual(self.commands_sent, ["catch java.lang.Exception"])
@@ -373,6 +412,11 @@ class JdbSessionCommandBuildingTests(unittest.TestCase):
     def test_reenter(self):
         self.session.reenter()
         self.assertEqual(self.commands_sent, ["reenter"])
+
+    def test_redefine(self):
+        self.session.redefine("com.example.Calc", "/work/target/classes/com/example/Calc.class")
+        self.assertEqual(self.commands_sent,
+                         ["redefine com.example.Calc /work/target/classes/com/example/Calc.class"])
 
     def test_trace(self):
         self.session.trace()

@@ -13,6 +13,8 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
+import os
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -25,7 +27,7 @@ from karellen_jdb_mcp.types import (
     ClassInfo, LockInfo, ThreadLockInfo,
     MonitorInfo, EvalResult, ConnectStatus, StringResult,
     VersionInfo, ExceptionBreakInfo, WatchpointInfo,
-    LaunchResult, ProcessStatus, SessionInfo,
+    LaunchResult, ProcessStatus, SessionInfo, RedefineResult,
 )
 import karellen_jdb_mcp.server as server
 
@@ -590,6 +592,93 @@ class ConcurrencyToolTests(unittest.TestCase):
 
     def tearDown(self):
         server._jdb_sessions = {}
+
+
+class RedefineToolTests(unittest.TestCase):
+    def setUp(self):
+        self.mock_session = MagicMock()
+        self.mock_session.is_connected.return_value = True
+        self.mock_session.breakpoint_list.return_value = (
+            "Breakpoints set:\n"
+            "\tbreakpoint com.example.Calc:3\n"
+            "\tbreakpoint com.example.Main:4\n"
+            "\tbreakpoint com.example.Calc.add(int, java.lang.String)\n"
+            "\tbreakpoint com.example.Calc$Inner:7\n"
+        )
+        self.mock_session.redefine.return_value = ""
+        self.mock_session.breakpoint_rearm.side_effect = lambda location: "Set breakpoint %s" % location
+        server._jdb_sessions = {5005: self.mock_session}
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.class_file = os.path.join(self.tmpdir.name, "Calc.class")
+        with open(self.class_file, "wb") as f:
+            f.write(b"\xca\xfe\xba\xbe")
+
+    def test_redefine_rearms_only_breakpoints_in_class(self):
+        result = server.jdb_redefine("com.example.Calc", self.class_file)
+        self.assertIsInstance(result, RedefineResult)
+        self.mock_session.redefine.assert_called_once_with("com.example.Calc", self.class_file)
+        self.assertEqual(result.rearmed_breakpoints,
+                         ["com.example.Calc:3", "com.example.Calc.add(int, java.lang.String)"])
+        self.assertEqual(result.rearm_failures, [])
+        self.assertEqual([c.args[0] for c in self.mock_session.breakpoint_rearm.call_args_list],
+                         ["com.example.Calc:3", "com.example.Calc.add(int, java.lang.String)"])
+
+    def test_redefine_reports_rearm_failures(self):
+        self.mock_session.breakpoint_rearm.side_effect = [
+            "Unable to set breakpoint com.example.Calc:3 : No code at line 3 in com.example.Calc",
+            "Set breakpoint com.example.Calc.add(int, java.lang.String)",
+        ]
+        result = server.jdb_redefine("com.example.Calc", self.class_file)
+        self.assertEqual(result.rearmed_breakpoints, ["com.example.Calc.add(int, java.lang.String)"])
+        self.assertEqual(len(result.rearm_failures), 1)
+        self.assertTrue(result.rearm_failures[0].startswith("com.example.Calc:3: Unable to set breakpoint"))
+
+    def test_redefine_resolves_relative_path(self):
+        cwd = os.getcwd()
+        os.chdir(self.tmpdir.name)
+        try:
+            result = server.jdb_redefine("com.example.Calc", "Calc.class")
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(result.class_file, os.path.realpath(self.class_file))
+        self.mock_session.redefine.assert_called_once_with("com.example.Calc", os.path.realpath(self.class_file))
+
+    def test_redefine_jdb_error_does_not_rearm(self):
+        self.mock_session.redefine.return_value = (
+            "Error redefining com.example.Calc to %s - "
+            "java.lang.UnsupportedOperationException: add method not implemented" % self.class_file)
+        with self.assertRaises(ToolError) as ctx:
+            server.jdb_redefine("com.example.Calc", self.class_file)
+        self.assertIn("add method not implemented", str(ctx.exception))
+        self.mock_session.breakpoint_rearm.assert_not_called()
+
+    def test_redefine_unknown_class(self):
+        self.mock_session.redefine.return_value = "No class named 'com.example.Nope'"
+        with self.assertRaises(ToolError) as ctx:
+            server.jdb_redefine("com.example.Nope", self.class_file)
+        self.assertIn("No class named", str(ctx.exception))
+        self.mock_session.breakpoint_rearm.assert_not_called()
+
+    def test_redefine_missing_file(self):
+        with self.assertRaises(ToolError) as ctx:
+            server.jdb_redefine("com.example.Calc", os.path.join(self.tmpdir.name, "Missing.class"))
+        self.assertIn("Class file not found", str(ctx.exception))
+        self.mock_session.redefine.assert_not_called()
+
+    def test_redefine_path_with_whitespace(self):
+        spaced_dir = os.path.join(self.tmpdir.name, "my classes")
+        os.mkdir(spaced_dir)
+        spaced_file = os.path.join(spaced_dir, "Calc.class")
+        with open(spaced_file, "wb") as f:
+            f.write(b"\xca\xfe\xba\xbe")
+        with self.assertRaises(ToolError) as ctx:
+            server.jdb_redefine("com.example.Calc", spaced_file)
+        self.assertIn("whitespace", str(ctx.exception))
+        self.mock_session.redefine.assert_not_called()
+
+    def tearDown(self):
+        server._jdb_sessions = {}
+        self.tmpdir.cleanup()
 
 
 class MonitorToolTests(unittest.TestCase):

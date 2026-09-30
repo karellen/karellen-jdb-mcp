@@ -75,6 +75,9 @@ jdb_connect(port=<returned_port>, wait_timeout=30)
 3. `jdb_locals()` and `jdb_print` to check values
 4. `jdb_step()`/`jdb_next()` to trace the logic
 5. `jdb_set("var", "value")` to test hypotheses by modifying state
+6. To verify a candidate fix to a method body without restarting, recompile the class
+   and `jdb_redefine("com.example.MyClass", "<path to MyClass.class>")`, then
+   `jdb_reenter()` or `jdb_cont()` to run the new code
 
 ### For Performance Issues
 1. `jdb_suspend()` at the right moment

@@ -62,6 +62,11 @@ PROMPT_RE = re.compile(r'^(?:> |.+\[\d+\] )$')
 PROMPT_SETTLE_TIME = 0.2
 
 
+def _breakpoint_key(location):
+    """Normalize a breakpoint location so spellings differing only in whitespace match."""
+    return "".join(location.split())
+
+
 class JdbSessionError(Exception):
     pass
 
@@ -163,6 +168,10 @@ class JdbSession:
         self._connected = False
         self._version_info = None
         self._stream = JdbReadStream()
+        # jdb's breakpoint listing omits thread and suspend-policy modifiers,
+        # so remember the exact command each breakpoint was set with in order
+        # to restore it faithfully (see breakpoint_rearm).
+        self._breakpoint_commands = {}
 
     @property
     def version_info(self):
@@ -585,10 +594,23 @@ class JdbSession:
             else:
                 cmd = "%s in %s" % (prefix, location)
 
+        self._breakpoint_commands[_breakpoint_key(location)] = cmd
         return self.send_command(cmd)
 
     def breakpoint_clear(self, location):
+        self._breakpoint_commands.pop(_breakpoint_key(location), None)
         return self.send_command("clear %s" % location)
+
+    def breakpoint_rearm(self, location):
+        """Clear a breakpoint and set it again with its original command.
+
+        Returns the output of the command that sets the breakpoint.
+        """
+        cmd = self._breakpoint_commands.get(_breakpoint_key(location))
+        if cmd is None:
+            cmd = ("stop at %s" if ":" in location else "stop in %s") % location
+        self.send_command("clear %s" % location)
+        return self.send_command(cmd)
 
     def breakpoint_list(self):
         return self.send_command("clear")
@@ -703,6 +725,9 @@ class JdbSession:
 
     def pop(self):
         return self.send_command("pop")
+
+    def redefine(self, class_id, class_file):
+        return self.send_command("redefine %s %s" % (class_id, class_file))
 
     def reenter(self):
         return self.send_command("reenter")
