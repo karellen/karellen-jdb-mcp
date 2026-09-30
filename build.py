@@ -44,7 +44,7 @@ default_task = ["analyze", "publish"]
 
 @init
 def set_properties(project):
-    project.depends_on("mcp")
+    project.depends_on("mcp", ">=2.2,<3")
 
     project.set_property("coverage_break_build", False)
 
