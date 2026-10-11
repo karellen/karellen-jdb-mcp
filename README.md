@@ -22,7 +22,7 @@ calls over the JDWP protocol.
 ## Requirements
 
 - **Java Development Kit** (JDK) with `jdb` on PATH (JDK 8 through 24+ supported)
-- **Python** >= 3.10
+- **Python** >= 3.11
 - Works on **Linux**, **macOS**, and **Windows** (anywhere JDB runs)
 
 ### Installing a JDK
